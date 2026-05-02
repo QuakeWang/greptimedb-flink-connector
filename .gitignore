@@ -4,21 +4,37 @@
 # Log file
 *.log
 
-# BlueJ files
-*.ctxt
+# Mac DS_Store
+**/*.DS_Store
 
-# Mobile Tools for Java (J2ME)
-.mtj.tmp/
-
-# Package Files #
-*.jar
-*.war
-*.nar
+# Package files
 *.ear
-*.zip
-*.tar.gz
+*.jar
+*.nar
 *.rar
+*.tar.gz
+*.war
+*.zip
 
-# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
+# Virtual machine crash logs
 hs_err_pid*
-replay_pid*
+
+# Java build target
+target/
+
+# Local GreptimeDB quickstart data
+greptimedb_data/
+
+# Dev tools
+.idea/
+*.iml
+.vscode/*
+
+# Java language server
+.classpath
+.factorypath
+.project
+.settings/
+
+# Local backup files
+*.bak
