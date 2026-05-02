@@ -152,6 +152,38 @@ class GreptimeBulkSinkWriterTest {
     }
 
     @Test
+    void conversionFailureAfterBufferedRowsDoesNotFlushOnClose() throws Exception {
+        RecordingBulkWriteClient client = new RecordingBulkWriteClient();
+        GreptimeBulkSinkWriter<RowData> writer =
+                newWriter(client, new TestProcessingTimeService(), new TestMailboxExecutor(), 100, 0L);
+
+        writer.write(row("host-1"), null);
+        assertThrows(IOException.class, () -> writer.write(rowWithNullTimestamp("host-2"), null));
+        writer.close();
+
+        assertEquals(List.of(), client.writeRows);
+        assertEquals(0, client.completedCalls);
+        assertEquals(1, client.closeStreamCalls);
+        assertEquals(1, client.shutdownClientCalls);
+    }
+
+    @Test
+    void nonInsertAfterBufferedRowsDoesNotFlushOnClose() throws Exception {
+        RecordingBulkWriteClient client = new RecordingBulkWriteClient();
+        GreptimeBulkSinkWriter<RowData> writer =
+                newWriter(client, new TestProcessingTimeService(), new TestMailboxExecutor(), 100, 0L);
+
+        writer.write(row("host-1"), null);
+        assertThrows(IOException.class, () -> writer.write(row("host-2", RowKind.UPDATE_AFTER), null));
+        writer.close();
+
+        assertEquals(List.of(), client.writeRows);
+        assertEquals(0, client.completedCalls);
+        assertEquals(1, client.closeStreamCalls);
+        assertEquals(1, client.shutdownClientCalls);
+    }
+
+    @Test
     void flushEndOfInputFlushesRowsAndCompletesStream() throws Exception {
         RecordingBulkWriteClient client = new RecordingBulkWriteClient();
         TestSinkWriterMetricGroup metricGroup = new TestSinkWriterMetricGroup();

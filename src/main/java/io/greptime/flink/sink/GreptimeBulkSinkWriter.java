@@ -64,6 +64,7 @@ final class GreptimeBulkSinkWriter<IN extends RowData> implements SinkWriter<IN>
     public void write(IN element, Context context) throws IOException, InterruptedException {
         ensureOpenForWrite();
         if (element.getRowKind() != RowKind.INSERT) {
+            markFailedAndClearBuffer();
             throw new IOException(
                     "GreptimeDB bulk sink only supports INSERT RowKind, but got: " + element.getRowKind());
         }
@@ -71,6 +72,7 @@ final class GreptimeBulkSinkWriter<IN extends RowData> implements SinkWriter<IN>
         try {
             values = converter.convert(element);
         } catch (IllegalArgumentException e) {
+            markFailedAndClearBuffer();
             throw new IOException(
                     "Invalid row for GreptimeDB table " + tableSchema.getTableName() + ": " + e.getMessage(), e);
         }
@@ -239,6 +241,7 @@ final class GreptimeBulkSinkWriter<IN extends RowData> implements SinkWriter<IN>
                 metrics.recordStreamReadyFalse();
             }
             affectedRows = client.writeNext(bulkWriteConfig.getTimeoutMsPerMessage(), TimeUnit.MILLISECONDS);
+            // The SDK reports one affected row per accepted input row; a mismatch would hide data loss.
             if (affectedRows != rows) {
                 throw new IOException(newAttemptContext(reason, rows, affectedRows, bytesUsed)
                         .affectedRowsMismatchMessage(affectedRows));
@@ -289,6 +292,12 @@ final class GreptimeBulkSinkWriter<IN extends RowData> implements SinkWriter<IN>
 
     private void markFailed() {
         state = State.FAILED;
+    }
+
+    private void markFailedAndClearBuffer() {
+        currentTable = null;
+        currentRows = 0;
+        markFailed();
     }
 
     private Exception releaseResources() {

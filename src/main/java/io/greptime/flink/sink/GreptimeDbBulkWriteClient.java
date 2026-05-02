@@ -14,8 +14,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 
 final class GreptimeDbBulkWriteClient implements GreptimeBulkWriteClient {
+    private static final AtomicLong STREAM_OPERATION_THREAD_ID = new AtomicLong();
+
     private final BulkStreamWriterFactory writerFactory;
     private final ExecutorService streamOperationExecutor;
     private final Runnable shutdownClient;
@@ -107,7 +110,7 @@ final class GreptimeDbBulkWriteClient implements GreptimeBulkWriteClient {
         });
         try {
             completion.get(timeout, unit);
-            markStreamClosed();
+            markStreamClosed(currentWriter);
         } catch (TimeoutException e) {
             completion.cancel(true);
             TimeoutException timeoutFailure = newCompletedTimeoutException(timeout, unit);
@@ -122,7 +125,7 @@ final class GreptimeDbBulkWriteClient implements GreptimeBulkWriteClient {
     }
 
     @Override
-    public void startNewStream(long timeout, TimeUnit unit) throws Exception {
+    public synchronized void startNewStream(long timeout, TimeUnit unit) throws Exception {
         validateTimeout(timeout, unit);
         if (hasOpenStream()) {
             return;
@@ -220,8 +223,12 @@ final class GreptimeDbBulkWriteClient implements GreptimeBulkWriteClient {
         if (writer == null || streamClosed) {
             return;
         }
-        writer.close();
-        streamClosed = true;
+        BulkStreamWriter closingWriter = writer;
+        try {
+            closingWriter.close();
+        } finally {
+            markStreamClosed(closingWriter);
+        }
     }
 
     @Override
@@ -232,7 +239,8 @@ final class GreptimeDbBulkWriteClient implements GreptimeBulkWriteClient {
 
     private static ExecutorService newStreamOperationExecutor() {
         return Executors.newSingleThreadExecutor(command -> {
-            Thread thread = new Thread(command, "greptimedb-bulk-stream-operation");
+            Thread thread = new Thread(
+                    command, "greptimedb-bulk-stream-operation-" + STREAM_OPERATION_THREAD_ID.incrementAndGet());
             thread.setDaemon(true);
             return thread;
         });
@@ -245,8 +253,11 @@ final class GreptimeDbBulkWriteClient implements GreptimeBulkWriteClient {
         Objects.requireNonNull(unit, "unit");
     }
 
-    private synchronized void markStreamClosed() {
-        streamClosed = true;
+    private synchronized void markStreamClosed(BulkStreamWriter closedWriter) {
+        if (writer == closedWriter) {
+            writer = null;
+            streamClosed = true;
+        }
     }
 
     private BulkStreamWriter createWriter() {

@@ -1,6 +1,7 @@
 package io.greptime.flink.sink;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -49,6 +50,69 @@ class GreptimeDbBulkWriteClientTest {
                     assertThrows(IllegalStateException.class, () -> client.startNewStream(50L, TimeUnit.MILLISECONDS));
 
             assertSame(creationFailure, error);
+        } finally {
+            client.shutdownClient();
+        }
+    }
+
+    @Test
+    void concurrentStartNewStreamOpensOnlyOneWriter() throws Exception {
+        AtomicInteger created = new AtomicInteger();
+        CountDownLatch callersReady = new CountDownLatch(2);
+        CountDownLatch startCalls = new CountDownLatch(1);
+        CountDownLatch createStarted = new CountDownLatch(1);
+        CountDownLatch releaseCreate = new CountDownLatch(1);
+        GreptimeDbBulkWriteClient client = new GreptimeDbBulkWriteClient(
+                () -> {
+                    created.incrementAndGet();
+                    createStarted.countDown();
+                    awaitLatchUnchecked(releaseCreate);
+                    return new PendingWriteNextBulkStreamWriter(CompletableFuture.completedFuture(0));
+                },
+                () -> {});
+        AtomicReference<Throwable> firstFailure = new AtomicReference<>();
+        AtomicReference<Throwable> secondFailure = new AtomicReference<>();
+        Thread first = startStreamThread(client, callersReady, startCalls, firstFailure);
+        Thread second = startStreamThread(client, callersReady, startCalls, secondFailure);
+
+        try {
+            first.start();
+            second.start();
+            assertTrue(callersReady.await(2000L, TimeUnit.MILLISECONDS), "callers did not become ready");
+            startCalls.countDown();
+            assertTrue(createStarted.await(2000L, TimeUnit.MILLISECONDS), "writer creation did not start");
+            Thread.sleep(100L);
+            releaseCreate.countDown();
+            first.join(2000L);
+            second.join(2000L);
+
+            assertTrue(!first.isAlive(), "first caller did not finish");
+            assertTrue(!second.isAlive(), "second caller did not finish");
+            assertNull(firstFailure.get());
+            assertNull(secondFailure.get());
+            assertEquals(1, created.get());
+        } finally {
+            releaseCreate.countDown();
+            client.shutdownClient();
+        }
+    }
+
+    @Test
+    void usesUniqueStreamOperationThreadName() throws Exception {
+        AtomicReference<String> threadName = new AtomicReference<>();
+        GreptimeDbBulkWriteClient client = new GreptimeDbBulkWriteClient(
+                () -> {
+                    threadName.set(Thread.currentThread().getName());
+                    return new PendingWriteNextBulkStreamWriter(CompletableFuture.completedFuture(0));
+                },
+                () -> {});
+
+        try {
+            client.startNewStream(50L, TimeUnit.MILLISECONDS);
+
+            assertTrue(
+                    threadName.get().matches("greptimedb-bulk-stream-operation-\\d+"),
+                    "unexpected thread name: " + threadName.get());
         } finally {
             client.shutdownClient();
         }
@@ -105,6 +169,24 @@ class GreptimeDbBulkWriteClientTest {
                     assertThrows(TimeoutException.class, () -> client.writeNext(50L, TimeUnit.MILLISECONDS));
 
             assertEquals("Timed out after 50 ms while invoking GreptimeDB bulk writeNext()", error.getMessage());
+            assertEquals(1, sdkWriter.closeCalls);
+        } finally {
+            client.shutdownClient();
+        }
+    }
+
+    @Test
+    void closeStreamMarksStreamClosedWhenCloseThrows() throws Exception {
+        ThrowingCloseBulkStreamWriter sdkWriter = new ThrowingCloseBulkStreamWriter();
+        GreptimeDbBulkWriteClient client = new GreptimeDbBulkWriteClient(sdkWriter);
+
+        try {
+            client.startNewStream(50L, TimeUnit.MILLISECONDS);
+
+            IllegalStateException error = assertThrows(IllegalStateException.class, client::closeStream);
+            client.closeStream();
+
+            assertEquals("close failed", error.getMessage());
             assertEquals(1, sdkWriter.closeCalls);
         } finally {
             client.shutdownClient();
@@ -192,6 +274,35 @@ class GreptimeDbBulkWriteClientTest {
                 failure.get() instanceof InterruptedException,
                 "expected InterruptedException, but got " + failure.get());
         assertTrue(interruptPreserved.get(), "interrupt status was not preserved");
+    }
+
+    private static Thread startStreamThread(
+            GreptimeDbBulkWriteClient client,
+            CountDownLatch callersReady,
+            CountDownLatch startCalls,
+            AtomicReference<Throwable> failure) {
+        return new Thread(
+                () -> {
+                    try {
+                        callersReady.countDown();
+                        startCalls.await();
+                        client.startNewStream(5000L, TimeUnit.MILLISECONDS);
+                    } catch (Throwable t) {
+                        failure.set(t);
+                    }
+                },
+                "greptimedb-bulk-client-start-test-caller");
+    }
+
+    private static void awaitLatchUnchecked(CountDownLatch latch) {
+        try {
+            if (!latch.await(2000L, TimeUnit.MILLISECONDS)) {
+                throw new IllegalStateException("timed out waiting for latch");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
     }
 
     private static final class BlockingBulkStreamWriterFactory {
@@ -351,6 +462,29 @@ class GreptimeDbBulkWriteClientTest {
 
         private boolean awaitClose(long timeoutMs) throws InterruptedException {
             return closeCalled.await(timeoutMs, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    private static final class ThrowingCloseBulkStreamWriter implements BulkStreamWriter {
+        private int closeCalls;
+
+        @Override
+        public Table.TableBufferRoot tableBufferRoot(int columnBufferSize) {
+            return new RecordingTable("metrics");
+        }
+
+        @Override
+        public CompletableFuture<Integer> writeNext() {
+            return CompletableFuture.completedFuture(0);
+        }
+
+        @Override
+        public void completed() {}
+
+        @Override
+        public void close() {
+            closeCalls++;
+            throw new IllegalStateException("close failed");
         }
     }
 
