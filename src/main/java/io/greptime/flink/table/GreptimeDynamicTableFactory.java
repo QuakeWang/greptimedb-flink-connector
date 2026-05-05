@@ -4,19 +4,25 @@ import io.greptime.flink.cfg.GreptimeBulkWriteConfig;
 import io.greptime.flink.cfg.GreptimeChangelogMode;
 import io.greptime.flink.cfg.GreptimeSinkConfig;
 import io.greptime.flink.cfg.GreptimeWriteMode;
+import io.greptime.flink.query.GreptimeQueryConfig;
+import io.greptime.flink.query.GreptimeQueryDialect;
 import io.greptime.flink.sink.schema.GreptimeTableSchema;
+import io.greptime.flink.source.GreptimeDynamicTableSource;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import org.apache.flink.configuration.ConfigOption;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.connector.sink.DynamicTableSink;
+import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.factories.DynamicTableSinkFactory;
+import org.apache.flink.table.factories.DynamicTableSourceFactory;
 import org.apache.flink.table.factories.FactoryUtil;
 import org.apache.flink.table.types.DataType;
 
-public final class GreptimeDynamicTableFactory implements DynamicTableSinkFactory {
+public final class GreptimeDynamicTableFactory implements DynamicTableSinkFactory, DynamicTableSourceFactory {
     @Override
     public String factoryIdentifier() {
         return GreptimeConnectorOptions.IDENTIFIER;
@@ -24,54 +30,45 @@ public final class GreptimeDynamicTableFactory implements DynamicTableSinkFactor
 
     @Override
     public Set<ConfigOption<?>> requiredOptions() {
-        Set<ConfigOption<?>> options = new HashSet<>();
-        options.add(GreptimeConnectorOptions.ENDPOINTS);
-        options.add(GreptimeConnectorOptions.TIME_INDEX);
-        return options;
+        return Set.of();
     }
 
     @Override
     public Set<ConfigOption<?>> optionalOptions() {
-        Set<ConfigOption<?>> options = new HashSet<>();
-        options.add(GreptimeConnectorOptions.DATABASE);
-        options.add(GreptimeConnectorOptions.TABLE);
-        options.add(GreptimeConnectorOptions.USERNAME);
-        options.add(GreptimeConnectorOptions.PASSWORD);
-        options.add(GreptimeConnectorOptions.TAGS);
-        options.add(GreptimeConnectorOptions.AUTO_CREATE_TABLE);
-        options.add(GreptimeConnectorOptions.APPEND_MODE);
-        options.add(GreptimeConnectorOptions.MERGE_MODE);
-        options.add(GreptimeConnectorOptions.TTL);
-        options.add(GreptimeConnectorOptions.BATCH_MAX_ROWS);
-        options.add(GreptimeConnectorOptions.FLUSH_INTERVAL_MS);
-        options.add(GreptimeConnectorOptions.SINK_WRITE_MODE);
-        options.add(GreptimeConnectorOptions.SINK_CHANGELOG_MODE);
-        options.add(GreptimeConnectorOptions.SINK_PARALLELISM);
-        options.add(GreptimeConnectorOptions.BULK_COLUMN_BUFFER_SIZE);
-        options.add(GreptimeConnectorOptions.BULK_TIMEOUT_MS_PER_MESSAGE);
-        options.add(GreptimeConnectorOptions.BULK_MAX_REQUESTS_IN_FLIGHT);
-        options.add(GreptimeConnectorOptions.BULK_ALLOCATOR_INIT_RESERVATION_BYTES);
-        options.add(GreptimeConnectorOptions.BULK_ALLOCATOR_MAX_ALLOCATION_BYTES);
-        options.add(GreptimeConnectorOptions.WRITE_MAX_RETRIES);
-        options.add(GreptimeConnectorOptions.WRITE_MAX_IN_FLIGHT_POINTS);
-        options.add(GreptimeConnectorOptions.WRITE_LIMIT_POLICY);
-        options.add(GreptimeConnectorOptions.WRITE_LIMIT_TIMEOUT_MS);
-        options.add(GreptimeConnectorOptions.WRITE_COMPRESSION);
-        options.add(GreptimeConnectorOptions.RPC_TIMEOUT_MS);
-        options.add(GreptimeConnectorOptions.ROUTE_REFRESH_PERIOD_S);
-        options.add(GreptimeConnectorOptions.ROUTE_HEALTH_TIMEOUT_MS);
-        return options;
+        return GreptimeConnectorOptions.allOptions();
+    }
+
+    @Override
+    public Set<ConfigOption<?>> forwardOptions() {
+        return Set.of();
+    }
+
+    @Override
+    public DynamicTableSource createDynamicTableSource(Context context) {
+        ReadableConfig options = validateFactoryOptions(context, GreptimeConnectorOptions.sourceOptions());
+        ResolvedSchema resolvedSchema = context.getCatalogTable().getResolvedSchema();
+        DataType physicalRowDataType = resolvedSchema.toPhysicalRowDataType();
+        String tableName = options.getOptional(GreptimeConnectorOptions.TABLE)
+                .orElseGet(() -> context.getObjectIdentifier().getObjectName());
+        String jdbcUrl =
+                options.getOptional(GreptimeConnectorOptions.QUERY_JDBC_URL).orElse(null);
+        if (jdbcUrl != null && GreptimeQueryDialect.MYSQL.hasSensitiveMaterial(jdbcUrl)) {
+            return GreptimeDynamicTableSource.withDeferredValidationFailure(
+                    GreptimeDynamicTableSource.DeferredValidationFailure.sensitiveJdbcUrl(
+                            GreptimeQueryDialect.MYSQL.redactJdbcUrl(jdbcUrl)),
+                    physicalRowDataType);
+        }
+        GreptimeQueryConfig queryConfig = GreptimeConnectorOptions.createQueryConfig(options, tableName);
+
+        return new GreptimeDynamicTableSource(queryConfig, physicalRowDataType);
     }
 
     @Override
     public DynamicTableSink createDynamicTableSink(Context context) {
-        FactoryUtil.TableFactoryHelper helper = FactoryUtil.createTableFactoryHelper(this, context);
-        helper.validate();
-
-        ReadableConfig options = helper.getOptions();
+        ReadableConfig options = validateFactoryOptions(context, GreptimeConnectorOptions.sinkOptions());
         ResolvedSchema resolvedSchema = context.getCatalogTable().getResolvedSchema();
         DataType physicalRowDataType = resolvedSchema.toPhysicalRowDataType();
-        GreptimeConnectorOptions.validate(options, resolvedSchema);
+        GreptimeConnectorOptions.validateSinkFactoryOptions(options, resolvedSchema);
 
         String tableName = options.getOptional(GreptimeConnectorOptions.TABLE)
                 .orElseGet(() -> context.getObjectIdentifier().getObjectName());
@@ -125,5 +122,28 @@ public final class GreptimeDynamicTableFactory implements DynamicTableSinkFactor
     private static Integer effectiveSinkParallelism(ReadableConfig options, GreptimeChangelogMode changelogMode) {
         return options.getOptional(GreptimeConnectorOptions.SINK_PARALLELISM)
                 .orElse(changelogMode == GreptimeChangelogMode.RETRACT ? 1 : null);
+    }
+
+    private static ReadableConfig validateFactoryOptions(Context context, Set<ConfigOption<?>> typedOptions) {
+        Configuration options = Configuration.fromMap(context.getCatalogTable().getOptions());
+        FactoryUtil.validateFactoryOptions(Set.of(), typedOptions, options);
+        FactoryUtil.validateUnconsumedKeys(GreptimeConnectorOptions.IDENTIFIER, options.keySet(), consumedOptionKeys());
+        FactoryUtil.validateWatermarkOptions(GreptimeConnectorOptions.IDENTIFIER, options);
+        return options;
+    }
+
+    private static Set<String> consumedOptionKeys() {
+        Set<String> keys = new HashSet<>();
+        for (ConfigOption<?> option : GreptimeConnectorOptions.allOptions()) {
+            keys.add(option.key());
+        }
+        keys.add(FactoryUtil.CONNECTOR.key());
+        keys.add(FactoryUtil.PROPERTY_VERSION.key());
+        keys.add(FactoryUtil.WATERMARK_EMIT_STRATEGY.key());
+        keys.add(FactoryUtil.WATERMARK_ALIGNMENT_GROUP.key());
+        keys.add(FactoryUtil.WATERMARK_ALIGNMENT_MAX_DRIFT.key());
+        keys.add(FactoryUtil.WATERMARK_ALIGNMENT_UPDATE_INTERVAL.key());
+        keys.add(FactoryUtil.SOURCE_IDLE_TIMEOUT.key());
+        return keys;
     }
 }
