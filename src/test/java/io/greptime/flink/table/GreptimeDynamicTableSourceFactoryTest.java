@@ -4,7 +4,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import io.greptime.flink.cfg.GreptimeSinkConfig;
+import io.greptime.flink.query.GreptimeQueryConfig;
 import io.greptime.flink.source.GreptimeDynamicTableSource;
+import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +50,49 @@ class GreptimeDynamicTableSourceFactoryTest {
                 .createDynamicTableSource(new TestFactoryContext(options, resolvedSchema(), "identifier_metrics"));
 
         assertTrue(source instanceof GreptimeDynamicTableSource);
+    }
+
+    @Test
+    void sourceUsesForwardedEnrichmentOptions() {
+        Map<String, String> options = sourceOptions();
+        Map<String, String> enrichmentOptions = Map.of(
+                GreptimeConnectorOptions.QUERY_JDBC_URL.key(),
+                "jdbc:mysql://10.0.0.1:4002/public?useSSL=false",
+                GreptimeConnectorOptions.USERNAME.key(),
+                "reader",
+                GreptimeConnectorOptions.PASSWORD.key(),
+                "reader-secret",
+                GreptimeConnectorOptions.QUERY_CONNECT_TIMEOUT_MS.key(),
+                "123",
+                GreptimeConnectorOptions.QUERY_SOCKET_TIMEOUT_MS.key(),
+                "456",
+                GreptimeConnectorOptions.TABLE.key(),
+                "enriched_metrics");
+
+        GreptimeDynamicTableSource source = (GreptimeDynamicTableSource) new GreptimeDynamicTableFactory()
+                .createDynamicTableSource(
+                        new TestFactoryContext(options, enrichmentOptions, resolvedSchema(), "identifier_metrics"));
+        GreptimeQueryConfig queryConfig = queryConfig(source);
+
+        assertEquals("jdbc:mysql://10.0.0.1:4002/public?useSSL=false", queryConfig.getJdbcUrl());
+        assertEquals("reader", queryConfig.getUsername());
+        assertEquals("reader-secret", queryConfig.getPassword());
+        assertEquals(123, queryConfig.getConnectTimeoutMs());
+        assertEquals(456, queryConfig.getSocketTimeoutMs());
+        assertEquals("identifier_metrics", queryConfig.getTable());
+    }
+
+    @Test
+    void sourceIgnoresInvalidSinkOnlyEnrichmentOptions() {
+        Map<String, String> enrichmentOptions = Map.of(GreptimeConnectorOptions.RPC_TIMEOUT_MS.key(), "abc");
+
+        GreptimeDynamicTableSource source = (GreptimeDynamicTableSource) new GreptimeDynamicTableFactory()
+                .createDynamicTableSource(
+                        new TestFactoryContext(sourceOptions(), enrichmentOptions, resolvedSchema(), "metrics"));
+
+        assertEquals(
+                "jdbc:mysql://127.0.0.1:4002/public?useSSL=false",
+                queryConfig(source).getJdbcUrl());
     }
 
     @Test
@@ -138,6 +184,28 @@ class GreptimeDynamicTableSourceFactoryTest {
     }
 
     @Test
+    void tableEnvironmentMalformedSourceJdbcUrlDoesNotReportSecret() throws Exception {
+        TableEnvironment tableEnv = TableEnvironment.create(
+                EnvironmentSettings.newInstance().inBatchMode().build());
+        tableEnv.executeSql("CREATE TEMPORARY TABLE source_malformed_url_failure ("
+                        + " host STRING"
+                        + ") WITH ("
+                        + " 'connector' = 'greptimedb',"
+                        + " 'query.jdbc-url' = 'jdbc:mysql://127.0.0.1:4002/public?pa%zzsword=source-secret'"
+                        + ")")
+                .await();
+
+        Exception error = assertThrows(Exception.class, () -> {
+            collectAllRows(tableEnv, "SELECT COUNT(*) FROM source_malformed_url_failure");
+        });
+        String messages = collectMessages(error);
+
+        assertTrue(messages.contains("Invalid percent-encoding in `query.jdbc-url`"));
+        assertFalse(messages.contains("credentials or authentication tokens"));
+        assertFalse(messages.contains("source-secret"));
+    }
+
+    @Test
     void sinkStillRequiresSinkOptions() {
         Map<String, String> noEndpoints = new HashMap<>();
         noEndpoints.put(GreptimeConnectorOptions.TIME_INDEX.key(), "ts");
@@ -163,6 +231,76 @@ class GreptimeDynamicTableSourceFactoryTest {
                 .createDynamicTableSink(new TestFactoryContext(options, sinkResolvedSchema(), "identifier_metrics"));
 
         assertTrue(sink instanceof GreptimeDynamicTableSink);
+    }
+
+    @Test
+    void sinkUsesConnectionScopedForwardedEnrichmentOptions() {
+        Map<String, String> options = sinkOptions();
+        options.put(GreptimeConnectorOptions.BULK_TIMEOUT_MS_PER_MESSAGE.key(), "1111");
+        options.put(GreptimeConnectorOptions.WRITE_LIMIT_TIMEOUT_MS.key(), "2222");
+        options.put(GreptimeConnectorOptions.ROUTE_HEALTH_TIMEOUT_MS.key(), "333");
+        options.put(GreptimeConnectorOptions.RPC_TIMEOUT_MS.key(), "4444");
+
+        Map<String, String> enrichmentOptions = Map.of(
+                GreptimeConnectorOptions.ENDPOINTS.key(),
+                "10.0.0.1:4001",
+                GreptimeConnectorOptions.USERNAME.key(),
+                "writer",
+                GreptimeConnectorOptions.PASSWORD.key(),
+                "writer-secret",
+                GreptimeConnectorOptions.TABLE.key(),
+                "enriched_metrics",
+                GreptimeConnectorOptions.TIME_INDEX.key(),
+                "missing_ts",
+                GreptimeConnectorOptions.SINK_WRITE_MODE.key(),
+                "bulk");
+
+        GreptimeDynamicTableSink sink = (GreptimeDynamicTableSink) new GreptimeDynamicTableFactory()
+                .createDynamicTableSink(
+                        new TestFactoryContext(options, enrichmentOptions, sinkResolvedSchema(), "identifier_metrics"));
+
+        assertEquals(List.of("10.0.0.1:4001"), sink.getSinkConfig().getEndpoints());
+        assertEquals("writer", sink.getSinkConfig().getUsername());
+        assertEquals("writer-secret", sink.getSinkConfig().getPassword());
+        assertEquals(1111, sink.getSinkConfig().getBulkWriteConfig().getTimeoutMsPerMessage());
+        assertEquals(2222, sink.getSinkConfig().getWriteLimitTimeoutMs());
+        assertEquals(4444, sink.getSinkConfig().getRpcTimeoutMs());
+        assertEquals(333, sink.getSinkConfig().getRouteHealthTimeoutMs());
+        assertEquals("identifier_metrics", sink.getTableSchema().getTableName());
+        assertEquals("regular", sink.getSinkConfig().getWriteMode().optionValue());
+    }
+
+    @Test
+    void sinkBulkModeIgnoresRpcTimeoutFromEnrichmentOptions() {
+        Map<String, String> options = sinkOptions();
+        options.put(GreptimeConnectorOptions.SINK_WRITE_MODE.key(), "bulk");
+        options.put(GreptimeConnectorOptions.AUTO_CREATE_TABLE.key(), "false");
+
+        Map<String, String> enrichmentOptions = Map.of(
+                GreptimeConnectorOptions.ENDPOINTS.key(),
+                "10.0.0.2:4001",
+                GreptimeConnectorOptions.RPC_TIMEOUT_MS.key(),
+                "6543");
+
+        GreptimeDynamicTableSink sink = (GreptimeDynamicTableSink) new GreptimeDynamicTableFactory()
+                .createDynamicTableSink(
+                        new TestFactoryContext(options, enrichmentOptions, sinkResolvedSchema(), "metrics"));
+
+        assertEquals(List.of("10.0.0.2:4001"), sink.getSinkConfig().getEndpoints());
+        assertEquals(
+                GreptimeSinkConfig.DEFAULT_RPC_TIMEOUT_MS, sink.getSinkConfig().getRpcTimeoutMs());
+        assertEquals("bulk", sink.getSinkConfig().getWriteMode().optionValue());
+    }
+
+    @Test
+    void sinkIgnoresInvalidSourceOnlyEnrichmentOptions() {
+        Map<String, String> enrichmentOptions = Map.of(GreptimeConnectorOptions.QUERY_CONNECT_TIMEOUT_MS.key(), "abc");
+
+        GreptimeDynamicTableSink sink = (GreptimeDynamicTableSink) new GreptimeDynamicTableFactory()
+                .createDynamicTableSink(
+                        new TestFactoryContext(sinkOptions(), enrichmentOptions, sinkResolvedSchema(), "metrics"));
+
+        assertEquals(List.of("127.0.0.1:4001"), sink.getSinkConfig().getEndpoints());
     }
 
     private static Map<String, String> sourceOptions() {
@@ -230,12 +368,31 @@ class GreptimeDynamicTableSourceFactoryTest {
         return builder.toString();
     }
 
+    private static GreptimeQueryConfig queryConfig(GreptimeDynamicTableSource source) {
+        try {
+            Method method = GreptimeDynamicTableSource.class.getDeclaredMethod("getQueryConfig");
+            method.setAccessible(true);
+            return (GreptimeQueryConfig) method.invoke(source);
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(e);
+        }
+    }
+
     private static final class TestFactoryContext implements DynamicTableFactory.Context {
         private final ObjectIdentifier objectIdentifier;
         private final ResolvedCatalogTable catalogTable;
+        private final Map<String, String> enrichmentOptions;
         private final Configuration configuration = new Configuration();
 
         private TestFactoryContext(Map<String, String> options, ResolvedSchema resolvedSchema, String objectName) {
+            this(options, Map.of(), resolvedSchema, objectName);
+        }
+
+        private TestFactoryContext(
+                Map<String, String> options,
+                Map<String, String> enrichmentOptions,
+                ResolvedSchema resolvedSchema,
+                String objectName) {
             CatalogTable table = CatalogTable.newBuilder()
                     .schema(Schema.newBuilder()
                             .fromResolvedSchema(resolvedSchema)
@@ -244,6 +401,7 @@ class GreptimeDynamicTableSourceFactoryTest {
                     .build();
             this.objectIdentifier = ObjectIdentifier.of("default_catalog", "default_database", objectName);
             this.catalogTable = new ResolvedCatalogTable(table, resolvedSchema);
+            this.enrichmentOptions = Map.copyOf(enrichmentOptions);
         }
 
         @Override
@@ -258,7 +416,7 @@ class GreptimeDynamicTableSourceFactoryTest {
 
         @Override
         public Map<String, String> getEnrichmentOptions() {
-            return Map.of();
+            return enrichmentOptions;
         }
 
         @Override

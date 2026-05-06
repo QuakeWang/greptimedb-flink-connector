@@ -174,6 +174,24 @@ final class GreptimeConnectorOptions {
         return options;
     }
 
+    static Set<ConfigOption<?>> sourceForwardOptions() {
+        Set<ConfigOption<?>> options = new HashSet<>();
+        options.add(USERNAME);
+        options.add(PASSWORD);
+        options.add(QUERY_JDBC_URL);
+        options.add(QUERY_CONNECT_TIMEOUT_MS);
+        options.add(QUERY_SOCKET_TIMEOUT_MS);
+        return options;
+    }
+
+    static Set<ConfigOption<?>> sinkForwardOptions() {
+        Set<ConfigOption<?>> options = new HashSet<>();
+        options.add(ENDPOINTS);
+        options.add(USERNAME);
+        options.add(PASSWORD);
+        return options;
+    }
+
     static Set<ConfigOption<?>> sourceOptions() {
         Set<ConfigOption<?>> options = sharedOptions();
         options.add(QUERY_JDBC_URL);

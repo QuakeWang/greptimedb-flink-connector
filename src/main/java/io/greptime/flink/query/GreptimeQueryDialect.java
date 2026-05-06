@@ -94,20 +94,18 @@ public enum GreptimeQueryDialect {
     }
 
     public boolean hasSensitiveQueryKey(String jdbcUrl) {
-        try {
-            for (String normalizedKey : queryParameters(jdbcUrl, false)) {
-                if (isSensitiveQueryKey(normalizedKey)) {
-                    return true;
-                }
-            }
-            return false;
-        } catch (IllegalArgumentException e) {
-            return true;
-        }
+        return inspectQueryKeys(jdbcUrl).isSensitive();
     }
 
     public boolean hasSensitiveMaterial(String jdbcUrl) {
-        return hasAuthorityUserInfo(jdbcUrl) || hasSensitiveQueryKey(jdbcUrl);
+        return inspectSensitiveMaterial(jdbcUrl).isSensitive();
+    }
+
+    public JdbcUrlInspection inspectSensitiveMaterial(String jdbcUrl) {
+        if (hasAuthorityUserInfo(jdbcUrl)) {
+            return JdbcUrlInspection.sensitive();
+        }
+        return inspectQueryKeys(jdbcUrl);
     }
 
     boolean hasAuthorityUserInfo(String jdbcUrl) {
@@ -190,6 +188,19 @@ public enum GreptimeQueryDialect {
         return decodedKey.toLowerCase(Locale.ROOT);
     }
 
+    private static JdbcUrlInspection inspectQueryKeys(String jdbcUrl) {
+        try {
+            for (String normalizedKey : queryParameters(jdbcUrl, false)) {
+                if (isSensitiveQueryKey(normalizedKey)) {
+                    return JdbcUrlInspection.sensitive();
+                }
+            }
+            return JdbcUrlInspection.safe();
+        } catch (IllegalArgumentException e) {
+            return JdbcUrlInspection.malformed(e.getMessage());
+        }
+    }
+
     private static boolean isSensitiveQueryKey(String normalizedKey) {
         if ("user".equals(normalizedKey) || "username".equals(normalizedKey)) {
             return true;
@@ -240,5 +251,39 @@ public enum GreptimeQueryDialect {
             }
         }
         return authorityEnd;
+    }
+
+    public static final class JdbcUrlInspection {
+        private final boolean sensitive;
+        private final String malformedMessage;
+
+        private JdbcUrlInspection(boolean sensitive, String malformedMessage) {
+            this.sensitive = sensitive;
+            this.malformedMessage = malformedMessage;
+        }
+
+        private static JdbcUrlInspection safe() {
+            return new JdbcUrlInspection(false, null);
+        }
+
+        private static JdbcUrlInspection sensitive() {
+            return new JdbcUrlInspection(true, null);
+        }
+
+        private static JdbcUrlInspection malformed(String message) {
+            return new JdbcUrlInspection(false, Objects.requireNonNull(message, "message"));
+        }
+
+        public boolean isSensitive() {
+            return sensitive;
+        }
+
+        public boolean isMalformed() {
+            return malformedMessage != null;
+        }
+
+        public String malformedMessage() {
+            return malformedMessage;
+        }
     }
 }

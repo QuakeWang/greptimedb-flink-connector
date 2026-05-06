@@ -191,6 +191,10 @@ public final class GreptimeDynamicTableSource
                             + Objects.requireNonNull(redactedJdbcUrl, "redactedJdbcUrl"));
         }
 
+        public static DeferredValidationFailure malformedJdbcUrl(String message) {
+            return new DeferredValidationFailure(Objects.requireNonNull(message, "message"));
+        }
+
         private ValidationException asException() {
             return new ValidationException(message);
         }

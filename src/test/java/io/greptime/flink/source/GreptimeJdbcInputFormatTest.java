@@ -28,6 +28,7 @@ import org.junit.jupiter.api.Test;
 class GreptimeJdbcInputFormatTest {
     private static final String FAILING_NEXT_URL = "jdbc:mysql:greptime-input-format-open-next-failure";
     private static final String CLOSE_FAILURE_URL = "jdbc:mysql:greptime-input-format-close-failure";
+    private static final String NON_SQL_CLOSE_FAILURE_URL = "jdbc:mysql:greptime-input-format-non-sql-close-failure";
 
     @Test
     void closesJdbcResourcesWhenInitialNextFailsDuringOpen() throws Exception {
@@ -67,7 +68,7 @@ class GreptimeJdbcInputFormatTest {
     @Test
     void sanitizesCloseFailuresWhenClosingInputFormat() throws Exception {
         ResourceTracker tracker = new ResourceTracker();
-        Driver driver = new CloseFailureDriver(tracker);
+        Driver driver = new CloseFailureDriver(tracker, true);
         DriverManager.registerDriver(driver);
         try {
             GreptimeJdbcInputFormat inputFormat = new GreptimeJdbcInputFormat(
@@ -95,6 +96,37 @@ class GreptimeJdbcInputFormatTest {
             assertTrue(tracker.statementClosed.get());
             assertTrue(tracker.connectionClosed.get());
             assertTrue(inputFormat.reachedEnd());
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
+    void reportsNonSqlCloseFailureTypeWithoutExposingMessage() throws Exception {
+        ResourceTracker tracker = new ResourceTracker();
+        Driver driver = new CloseFailureDriver(tracker, false);
+        DriverManager.registerDriver(driver);
+        try {
+            GreptimeJdbcInputFormat inputFormat = new GreptimeJdbcInputFormat(
+                    queryConfig(NON_SQL_CLOSE_FAILURE_URL),
+                    (RowType) DataTypes.ROW(DataTypes.FIELD("host", DataTypes.STRING()))
+                            .getLogicalType(),
+                    List.of("host"),
+                    null);
+
+            inputFormat.open(new GenericInputSplit(0, 1));
+
+            IOException error = assertThrows(IOException.class, inputFormat::close);
+
+            assertTrue(error.getMessage().contains("Failed to close GreptimeDB query resources"));
+            assertFalse(error.getMessage().contains("non-sql-close-secret"));
+            assertSame(SQLException.class, error.getCause().getClass());
+            assertTrue(error.getCause().getMessage().contains(IllegalStateException.class.getName()));
+            assertTrue(error.getCause().getMessage().contains("original driver message is hidden"));
+            assertFalse(error.getCause().getMessage().contains("non-sql-close-secret"));
+            assertTrue(tracker.resultSetClosed.get());
+            assertTrue(tracker.statementClosed.get());
+            assertTrue(tracker.connectionClosed.get());
         } finally {
             DriverManager.deregisterDriver(driver);
         }
@@ -173,17 +205,18 @@ class GreptimeJdbcInputFormatTest {
                 });
     }
 
-    private static Connection closeFailingConnection(ResourceTracker tracker) {
+    private static Connection closeFailingConnection(ResourceTracker tracker, boolean sqlFailure) {
         return (Connection) Proxy.newProxyInstance(
                 GreptimeJdbcInputFormatTest.class.getClassLoader(),
                 new Class<?>[] {Connection.class},
                 (proxy, method, args) -> {
                     switch (method.getName()) {
                         case "createStatement":
-                            return closeFailingStatement(tracker);
+                            return closeFailingStatement(tracker, sqlFailure);
                         case "close":
                             tracker.connectionClosed.set(true);
-                            throw new SQLException("connection close failed with close-secret");
+                            throwCloseFailure("connection", sqlFailure);
+                            return null;
                         case "isClosed":
                             return tracker.connectionClosed.get();
                         case "toString":
@@ -194,19 +227,20 @@ class GreptimeJdbcInputFormatTest {
                 });
     }
 
-    private static Statement closeFailingStatement(ResourceTracker tracker) {
+    private static Statement closeFailingStatement(ResourceTracker tracker, boolean sqlFailure) {
         return (Statement) Proxy.newProxyInstance(
                 GreptimeJdbcInputFormatTest.class.getClassLoader(),
                 new Class<?>[] {Statement.class},
                 (proxy, method, args) -> {
                     switch (method.getName()) {
                         case "executeQuery":
-                            return closeFailingResultSet(tracker);
+                            return closeFailingResultSet(tracker, sqlFailure);
                         case "setFetchSize":
                             return null;
                         case "close":
                             tracker.statementClosed.set(true);
-                            throw new SQLException("statement close failed with close-secret");
+                            throwCloseFailure("statement", sqlFailure);
+                            return null;
                         case "toString":
                             return "CloseFailingStatement";
                         default:
@@ -215,7 +249,7 @@ class GreptimeJdbcInputFormatTest {
                 });
     }
 
-    private static ResultSet closeFailingResultSet(ResourceTracker tracker) {
+    private static ResultSet closeFailingResultSet(ResourceTracker tracker, boolean sqlFailure) {
         return (ResultSet) Proxy.newProxyInstance(
                 GreptimeJdbcInputFormatTest.class.getClassLoader(),
                 new Class<?>[] {ResultSet.class},
@@ -225,13 +259,21 @@ class GreptimeJdbcInputFormatTest {
                             return false;
                         case "close":
                             tracker.resultSetClosed.set(true);
-                            throw new SQLException("result close failed with close-secret");
+                            throwCloseFailure("result", sqlFailure);
+                            return null;
                         case "toString":
                             return "CloseFailingResultSet";
                         default:
                             return defaultValue(method.getReturnType());
                     }
                 });
+    }
+
+    private static void throwCloseFailure(String resource, boolean sqlFailure) throws SQLException {
+        if (sqlFailure) {
+            throw new SQLException(resource + " close failed with close-secret");
+        }
+        throw new IllegalStateException(resource + " close failed with non-sql-close-secret");
     }
 
     private static Object defaultValue(Class<?> returnType) {
@@ -316,19 +358,21 @@ class GreptimeJdbcInputFormatTest {
 
     private static final class CloseFailureDriver implements Driver {
         private final ResourceTracker tracker;
+        private final boolean sqlFailure;
 
-        private CloseFailureDriver(ResourceTracker tracker) {
+        private CloseFailureDriver(ResourceTracker tracker, boolean sqlFailure) {
             this.tracker = tracker;
+            this.sqlFailure = sqlFailure;
         }
 
         @Override
         public Connection connect(String url, Properties info) throws SQLException {
-            return acceptsURL(url) ? closeFailingConnection(tracker) : null;
+            return acceptsURL(url) ? closeFailingConnection(tracker, sqlFailure) : null;
         }
 
         @Override
         public boolean acceptsURL(String url) {
-            return CLOSE_FAILURE_URL.equals(url);
+            return CLOSE_FAILURE_URL.equals(url) || NON_SQL_CLOSE_FAILURE_URL.equals(url);
         }
 
         @Override

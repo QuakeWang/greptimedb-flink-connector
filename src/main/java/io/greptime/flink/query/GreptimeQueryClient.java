@@ -74,8 +74,10 @@ public final class GreptimeQueryClient implements Serializable {
         if (cause instanceof SQLException) {
             return sanitizedCause((SQLException) cause);
         }
-        SQLException sanitizedCause = new SQLException(
-                "JDBC driver error while accessing GreptimeDB; original driver message is hidden because it may contain credentials");
+        SQLException sanitizedCause = new SQLException("JDBC driver error while accessing GreptimeDB; original "
+                + "driver message is hidden ("
+                + cause.getClass().getName()
+                + ") because it may contain credentials");
         sanitizedCause.setStackTrace(cause.getStackTrace());
         return sanitizedCause;
     }

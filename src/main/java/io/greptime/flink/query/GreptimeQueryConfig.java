@@ -145,7 +145,11 @@ public final class GreptimeQueryConfig implements Serializable {
     }
 
     private static void validateJdbcUrlConflicts(GreptimeQueryDialect dialect, String jdbcUrl) {
-        if (dialect.hasSensitiveMaterial(jdbcUrl)) {
+        GreptimeQueryDialect.JdbcUrlInspection inspection = dialect.inspectSensitiveMaterial(jdbcUrl);
+        if (inspection.isMalformed()) {
+            throw new IllegalArgumentException(inspection.malformedMessage());
+        }
+        if (inspection.isSensitive()) {
             throw new IllegalArgumentException(
                     "`query.jdbc-url` must not contain credentials or authentication tokens; configure `username` and `password` options instead");
         }

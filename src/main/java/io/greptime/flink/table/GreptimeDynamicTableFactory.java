@@ -10,6 +10,7 @@ import io.greptime.flink.sink.schema.GreptimeTableSchema;
 import io.greptime.flink.source.GreptimeDynamicTableSource;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
@@ -45,18 +46,29 @@ public final class GreptimeDynamicTableFactory implements DynamicTableSinkFactor
 
     @Override
     public DynamicTableSource createDynamicTableSource(Context context) {
-        ReadableConfig options = validateFactoryOptions(context, GreptimeConnectorOptions.sourceOptions());
+        ReadableConfig options = validateFactoryOptions(
+                context, GreptimeConnectorOptions.sourceOptions(), GreptimeConnectorOptions.sourceForwardOptions());
         ResolvedSchema resolvedSchema = context.getCatalogTable().getResolvedSchema();
         DataType physicalRowDataType = resolvedSchema.toPhysicalRowDataType();
         String tableName = options.getOptional(GreptimeConnectorOptions.TABLE)
                 .orElseGet(() -> context.getObjectIdentifier().getObjectName());
         String jdbcUrl =
                 options.getOptional(GreptimeConnectorOptions.QUERY_JDBC_URL).orElse(null);
-        if (jdbcUrl != null && GreptimeQueryDialect.MYSQL.hasSensitiveMaterial(jdbcUrl)) {
-            return GreptimeDynamicTableSource.withDeferredValidationFailure(
-                    GreptimeDynamicTableSource.DeferredValidationFailure.sensitiveJdbcUrl(
-                            GreptimeQueryDialect.MYSQL.redactJdbcUrl(jdbcUrl)),
-                    physicalRowDataType);
+        if (jdbcUrl != null) {
+            GreptimeQueryDialect.JdbcUrlInspection inspection =
+                    GreptimeQueryDialect.MYSQL.inspectSensitiveMaterial(jdbcUrl);
+            if (inspection.isMalformed()) {
+                return GreptimeDynamicTableSource.withDeferredValidationFailure(
+                        GreptimeDynamicTableSource.DeferredValidationFailure.malformedJdbcUrl(
+                                inspection.malformedMessage()),
+                        physicalRowDataType);
+            }
+            if (inspection.isSensitive()) {
+                return GreptimeDynamicTableSource.withDeferredValidationFailure(
+                        GreptimeDynamicTableSource.DeferredValidationFailure.sensitiveJdbcUrl(
+                                GreptimeQueryDialect.MYSQL.redactJdbcUrl(jdbcUrl)),
+                        physicalRowDataType);
+            }
         }
         GreptimeQueryConfig queryConfig = GreptimeConnectorOptions.createQueryConfig(options, tableName);
 
@@ -65,7 +77,8 @@ public final class GreptimeDynamicTableFactory implements DynamicTableSinkFactor
 
     @Override
     public DynamicTableSink createDynamicTableSink(Context context) {
-        ReadableConfig options = validateFactoryOptions(context, GreptimeConnectorOptions.sinkOptions());
+        ReadableConfig options = validateFactoryOptions(
+                context, GreptimeConnectorOptions.sinkOptions(), GreptimeConnectorOptions.sinkForwardOptions());
         ResolvedSchema resolvedSchema = context.getCatalogTable().getResolvedSchema();
         DataType physicalRowDataType = resolvedSchema.toPhysicalRowDataType();
         GreptimeConnectorOptions.validateSinkFactoryOptions(options, resolvedSchema);
@@ -124,12 +137,27 @@ public final class GreptimeDynamicTableFactory implements DynamicTableSinkFactor
                 .orElse(changelogMode == GreptimeChangelogMode.RETRACT ? 1 : null);
     }
 
-    private static ReadableConfig validateFactoryOptions(Context context, Set<ConfigOption<?>> typedOptions) {
+    private static ReadableConfig validateFactoryOptions(
+            Context context, Set<ConfigOption<?>> typedOptions, Set<ConfigOption<?>> forwardOptions) {
         Configuration options = Configuration.fromMap(context.getCatalogTable().getOptions());
+        mergeForwardOptions(options, context.getEnrichmentOptions(), forwardOptions);
         FactoryUtil.validateFactoryOptions(Set.of(), typedOptions, options);
         FactoryUtil.validateUnconsumedKeys(GreptimeConnectorOptions.IDENTIFIER, options.keySet(), consumedOptionKeys());
         FactoryUtil.validateWatermarkOptions(GreptimeConnectorOptions.IDENTIFIER, options);
         return options;
+    }
+
+    private static void mergeForwardOptions(
+            Configuration options, Map<String, String> enrichmentOptions, Set<ConfigOption<?>> forwardOptions) {
+        Configuration enrichment = Configuration.fromMap(enrichmentOptions);
+        for (ConfigOption<?> option : forwardOptions) {
+            mergeForwardOption(options, enrichment, option);
+        }
+    }
+
+    private static <T> void mergeForwardOption(
+            Configuration options, Configuration enrichment, ConfigOption<T> option) {
+        enrichment.getOptional(option).ifPresent(value -> options.set(option, value));
     }
 
     private static Set<String> consumedOptionKeys() {

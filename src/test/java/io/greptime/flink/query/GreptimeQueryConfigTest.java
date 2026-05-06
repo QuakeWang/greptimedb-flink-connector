@@ -157,6 +157,18 @@ class GreptimeQueryConfigTest {
     }
 
     @Test
+    void rejectsInvalidPercentEncodingInJdbcUrlQueryKey() {
+        IllegalArgumentException error =
+                assertThrows(IllegalArgumentException.class, () -> GreptimeQueryConfig.builder()
+                        .jdbcUrl("jdbc:mysql://127.0.0.1:4002/public?pa%zzsword=secret")
+                        .database("public")
+                        .table("metrics")
+                        .build());
+
+        assertEquals("Invalid percent-encoding in `query.jdbc-url`", error.getMessage());
+    }
+
+    @Test
     void validatesSourceQueryOptions() {
         assertEquals(
                 "`query.jdbc-url` is required for GreptimeDB source",
