@@ -41,7 +41,9 @@ public final class GreptimeDynamicTableFactory implements DynamicTableSinkFactor
 
     @Override
     public Set<ConfigOption<?>> forwardOptions() {
-        return Set.of();
+        Set<ConfigOption<?>> options = GreptimeConnectorOptions.sourceForwardOptions();
+        options.addAll(GreptimeConnectorOptions.sinkForwardOptions());
+        return options;
     }
 
     @Override

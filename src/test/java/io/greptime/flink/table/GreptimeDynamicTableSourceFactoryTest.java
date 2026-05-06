@@ -11,6 +11,8 @@ import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.table.api.DataTypes;
@@ -36,7 +38,18 @@ class GreptimeDynamicTableSourceFactoryTest {
         GreptimeDynamicTableFactory factory = new GreptimeDynamicTableFactory();
 
         assertTrue(factory.requiredOptions().isEmpty());
-        assertTrue(factory.forwardOptions().isEmpty());
+        Set<ConfigOption<?>> forwardOptions = factory.forwardOptions();
+        assertTrue(forwardOptions.contains(GreptimeConnectorOptions.QUERY_JDBC_URL));
+        assertTrue(forwardOptions.contains(GreptimeConnectorOptions.QUERY_CONNECT_TIMEOUT_MS));
+        assertTrue(forwardOptions.contains(GreptimeConnectorOptions.QUERY_SOCKET_TIMEOUT_MS));
+        assertTrue(forwardOptions.contains(GreptimeConnectorOptions.ENDPOINTS));
+        assertTrue(forwardOptions.contains(GreptimeConnectorOptions.USERNAME));
+        assertTrue(forwardOptions.contains(GreptimeConnectorOptions.PASSWORD));
+        assertFalse(forwardOptions.contains(GreptimeConnectorOptions.RPC_TIMEOUT_MS));
+        assertFalse(forwardOptions.contains(GreptimeConnectorOptions.TABLE));
+        assertFalse(forwardOptions.contains(GreptimeConnectorOptions.TIME_INDEX));
+        assertFalse(forwardOptions.contains(GreptimeConnectorOptions.TAGS));
+        assertFalse(forwardOptions.contains(GreptimeConnectorOptions.SINK_WRITE_MODE));
         assertTrue(factory.optionalOptions().contains(GreptimeConnectorOptions.ENDPOINTS));
         assertTrue(factory.optionalOptions().contains(GreptimeConnectorOptions.TIME_INDEX));
         assertTrue(factory.optionalOptions().contains(GreptimeConnectorOptions.QUERY_JDBC_URL));
