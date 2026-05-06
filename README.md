@@ -1,27 +1,27 @@
 # GreptimeDB Flink Connector
 
-Flink SQL sink connector for writing `RowData` into GreptimeDB through the GreptimeDB Java Ingester.
+Flink SQL connector for writing `RowData` into GreptimeDB through the GreptimeDB Java Ingester and reading bounded batches through GreptimeDB's MySQL-compatible JDBC endpoint.
 
 ## Status
 
-This is a personal, unofficial project in active development. It currently provides a sink connector only.
+This is a personal, unofficial project in active development. It currently provides sink support and a bounded batch source.
 
 - Target runtime: Flink `1.20.3`, Java `11`, GreptimeDB Java Ingester `0.15.0`
-- Supported: Flink SQL Table sink, Regular insert/retract writes, Bulk insert-only writes
+- Supported: Flink SQL Table sink, bounded batch source, Regular insert/retract writes, Bulk insert-only writes
 - Delivery: at-least-once
 
 Bulk write uses a long-lived GreptimeDB bulk stream. `batch.max-rows` and `flush.interval-ms` send buffered rows with `writeNext`; the stream is completed on Flink checkpoint flush, end-of-input, or writer close. For streaming jobs that use `sink.write-mode=bulk`, enable checkpoints so the connector has regular completion boundaries. Without checkpoints, completion happens only when the bounded input ends or the writer closes.
 
 Not implemented:
 
-- Source connector
+- Streaming or CDC source connector
 - Lookup connector
 - Bulk update/delete/changelog writes
 - Exactly-once delivery
 
 ## Documentation
 
-- [QuickStart](docs/quickstart.md): build the connector, run local writes, and understand the supported sink modes.
+- [QuickStart](docs/quickstart.md): build the connector, run local sink/source examples, and understand the supported modes.
 - [Connector Options](docs/options.md): SQL options, defaults, and mode-specific constraints.
 
 ## Build
@@ -32,7 +32,7 @@ mvn package
 
 Use the shaded jar from `target/*-shaded.jar` when deploying to Flink. The thin jar does not include the GreptimeDB Java Ingester runtime dependencies.
 
-## Example
+## Sink Example
 
 ```sql
 CREATE TABLE metrics_sink (
@@ -54,3 +54,26 @@ CREATE TABLE metrics_sink (
 ```
 
 `time-index` must reference a non-null `TIMESTAMP` or `TIMESTAMP_LTZ` column. `tags` define GreptimeDB tag columns and must follow the physical column order in the Flink table schema.
+
+## Bounded Source Example
+
+Source scans use GreptimeDB's MySQL-compatible JDBC endpoint. MySQL Connector/J must be available on the Flink classpath.
+
+```sql
+CREATE TABLE metrics_source (
+  host STRING,
+  region STRING,
+  cpu DOUBLE,
+  ts TIMESTAMP(3)
+) WITH (
+  'connector' = 'greptimedb',
+  'query.jdbc-url' = 'jdbc:mysql://127.0.0.1:4002/public?useSSL=false&allowPublicKeyRetrieval=true',
+  'database' = 'public',
+  'table' = 'metrics'
+);
+
+SELECT host, region, cpu, ts
+FROM metrics_source
+ORDER BY host
+LIMIT 10;
+```

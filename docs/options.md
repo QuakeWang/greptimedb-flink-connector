@@ -21,25 +21,56 @@ CREATE TABLE metrics_sink (
 );
 ```
 
-`connector`, `endpoints`, and `time-index` are required. If `table` is not set, the connector uses the Flink catalog table name.
+For sinks, `connector`, `endpoints`, and `time-index` are required. For bounded sources, `connector` and `query.jdbc-url` are required. If `table` is not set, the connector uses the Flink catalog table name.
+
+```sql
+CREATE TABLE metrics_src (
+  host STRING,
+  region STRING,
+  cpu DOUBLE,
+  ts TIMESTAMP(3)
+) WITH (
+  'connector' = 'greptimedb',
+  'query.jdbc-url' = 'jdbc:mysql://127.0.0.1:4002/public?useSSL=false&allowPublicKeyRetrieval=true',
+  'database' = 'public',
+  'table' = 'metrics'
+);
+```
 
 ## Connection Options
 
 | Option | Required | Default | Scope | Description |
 | --- | --- | --- | --- | --- |
 | `connector` | Yes | none | all | Must be `greptimedb`. |
-| `endpoints` | Yes | none | all | GreptimeDB gRPC endpoints. Use semicolons in SQL, for example `127.0.0.1:4001;127.0.0.2:4001`. Each endpoint must be `host:port`. |
+| `endpoints` | sink | none | sink | GreptimeDB gRPC write endpoints. Use semicolons in SQL, for example `127.0.0.1:4001;127.0.0.2:4001`. Each endpoint must be `host:port`. |
 | `database` | No | `public` | all | GreptimeDB database. Must not be blank or contain leading/trailing whitespace. |
 | `table` | No | Flink table name | all | GreptimeDB table. Must not be blank or contain leading/trailing whitespace. |
 | `username` | No | none | all | Authentication username. Must be configured together with `password`; blank values are treated as unset. |
 | `password` | No | none | all | Authentication password. Must be configured together with `username`; blank values are treated as unset. |
+| `route.refresh-period-s` | No | `600` | sink | SDK route table background refresh period in seconds. Must be greater than or equal to `0`; `0` disables background refresh. |
+| `route.health-timeout-ms` | No | `1000` | sink | SDK route health check timeout. Must be greater than `0`. |
+
+## Query Source Options
+
+The connector implements a bounded batch source backed by MySQL-compatible JDBC. The source is single-split and does not provide streaming, CDC, lookup, filter pushdown, PostgreSQL JDBC, or Arrow Flight/gRPC read support.
+
+| Option | Required | Default | Scope | Description |
+| --- | --- | --- | --- | --- |
+| `query.jdbc-url` | source | none | source | GreptimeDB MySQL JDBC URL. Only URLs starting with `jdbc:mysql:` are accepted. Do not put credentials or authentication tokens in this URL. The MySQL-compatible JDBC driver must be available on the Flink classpath. |
+| `query.connect-timeout-ms` | No | `10000` | source | MySQL Connector/J `connectTimeout` property in milliseconds. Must be greater than `0`; do not duplicate it in `query.jdbc-url`. |
+| `query.socket-timeout-ms` | No | `300000` | source | MySQL Connector/J `socketTimeout` property in milliseconds. Must be greater than `0`; do not duplicate it in `query.jdbc-url`. |
+| `query.fetch-size` | No | `0` | source | JDBC fetch size hint. `0` leaves the driver default; positive values are passed to `Statement.setFetchSize`. |
+
+Source scans support top-level projection pushdown, projection reorder, empty projection for row-count preserving scans, and best-effort limit pushdown. Filters remain in Flink and are not accepted by the connector.
+
+Authentication uses the `username` and `password` options. `query.jdbc-url` must not contain authority user info or query parameters whose decoded key is `user`/`username` or contains sensitive fragments such as `password`, `token`, `secret`, `apikey`, `auth`, or `credential`. Diagnostic messages redact those URL query parameters when reporting unsupported URLs.
 
 ## Schema Options
 
 | Option | Required | Default | Scope | Description |
 | --- | --- | --- | --- | --- |
-| `time-index` | Yes | none | all | GreptimeDB time index column. It must reference a physical column whose type is non-null `TIMESTAMP` or `TIMESTAMP_LTZ`. |
-| `tags` | No | empty | all | GreptimeDB tag columns. Use semicolons in SQL. Each tag must exist, must be unique, must not equal `time-index`, and must follow the Flink physical column order. |
+| `time-index` | sink | none | sink | GreptimeDB time index column. It must reference a physical column whose type is non-null `TIMESTAMP` or `TIMESTAMP_LTZ`. |
+| `tags` | No | empty | sink | GreptimeDB tag columns. Use semicolons in SQL. Each tag must exist, must be unique, must not equal `time-index`, and must follow the Flink physical column order. |
 
 Timestamp precision currently supports only `0`, `3`, `6`, and `9`, mapped to GreptimeDB second, millisecond, microsecond, and nanosecond timestamps. Other precisions are rejected during table validation.
 
@@ -49,11 +80,11 @@ When `auto-create-table=true` or `sink.changelog-mode=retract`, a declared Flink
 
 | Option | Required | Default | Scope | Description |
 | --- | --- | --- | --- | --- |
-| `sink.write-mode` | No | `regular` | all | Write mode. Supported values: `regular`, `bulk`. |
-| `sink.changelog-mode` | No | `insert-only` | all | Accepted changelog mode. Supported values: `insert-only`, `retract`. `retract` is supported only in regular write mode. |
-| `sink.parallelism` | No | unset | all | Sink operator parallelism. Must be greater than `0`; retract mode requires `1`. If unset, retract mode uses `1` automatically. |
-| `batch.max-rows` | No | `1000` | all | Maximum rows per flush. Must be greater than `0`. |
-| `flush.interval-ms` | No | `0` | all | Periodic flush interval. `0` disables periodic flushing; non-zero values must be greater than `0`. |
+| `sink.write-mode` | No | `regular` | sink | Write mode. Supported values: `regular`, `bulk`. |
+| `sink.changelog-mode` | No | `insert-only` | sink | Accepted changelog mode. Supported values: `insert-only`, `retract`. `retract` is supported only in regular write mode. |
+| `sink.parallelism` | No | unset | sink | Sink operator parallelism. Must be greater than `0`; retract mode requires `1`. If unset, retract mode uses `1` automatically. |
+| `batch.max-rows` | No | `1000` | sink | Maximum rows per flush. Must be greater than `0`. |
+| `flush.interval-ms` | No | `0` | sink | Periodic flush interval. `0` disables periodic flushing; non-zero values must be greater than `0`. |
 
 `regular` is the default and uses the GreptimeDB Java Ingester Regular Write API. `bulk` uses the Bulk Write API for large insert-only writes, but it requires an existing target table with an exactly matching schema.
 
@@ -71,8 +102,6 @@ When `auto-create-table=true` or `sink.changelog-mode=retract`, a declared Flink
 | `write.limit-timeout-ms` | No | `3000` | regular | Limiter timeout. Must be greater than or equal to `0`. |
 | `write.compression` | No | `none` | regular | Regular write RPC compression. Supported values: `none`, `gzip`, `zstd`. |
 | `rpc.timeout-ms` | No | `60000` | regular | Timeout while waiting for the regular write RPC future. Must be greater than `0`. |
-| `route.refresh-period-s` | No | `600` | all | SDK route table background refresh period in seconds. Must be greater than or equal to `0`; `0` disables background refresh. |
-| `route.health-timeout-ms` | No | `1000` | all | SDK route health check timeout. Must be greater than `0`. |
 
 `sink.changelog-mode=insert-only` accepts only `INSERT` RowKind. `sink.changelog-mode=retract` accepts `INSERT`, `UPDATE_AFTER`, `UPDATE_BEFORE`, and `DELETE`: `INSERT` and `UPDATE_AFTER` are written as GreptimeDB inserts, while `UPDATE_BEFORE` and `DELETE` are written as GreptimeDB deletes. Delete payloads contain only row key columns: `tags` plus `time-index`.
 
@@ -103,6 +132,8 @@ Bulk write does not use Regular Write hints or compression. The following Regula
 
 ## Type Support
 
+Sink writes and table auto-creation support the Flink-to-GreptimeDB type mapping below.
+
 | Flink logical type | GreptimeDB type |
 | --- | --- |
 | `BOOLEAN` | `Bool` |
@@ -119,7 +150,7 @@ Bulk write does not use Regular Write hints or compression. The following Regula
 | `TIMESTAMP(0/3/6/9)` | second/millisecond/microsecond/nanosecond timestamp |
 | `TIMESTAMP_LTZ(0/3/6/9)` | second/millisecond/microsecond/nanosecond timestamp |
 
-Flink logical types not listed above are rejected.
+Flink logical types not listed above are rejected for sink schemas. Source scans support the same scalar logical types except `TIMESTAMP_LTZ`, which is intentionally rejected until the GreptimeDB MySQL timestamp/session timezone semantics are covered by real integration tests.
 
 ## Option Constraints
 

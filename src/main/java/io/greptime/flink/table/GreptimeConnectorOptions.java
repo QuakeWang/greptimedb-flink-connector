@@ -6,8 +6,10 @@ import io.greptime.flink.cfg.GreptimeConfigValidator;
 import io.greptime.flink.cfg.GreptimeHintOptions;
 import io.greptime.flink.cfg.GreptimeSinkConfig;
 import io.greptime.flink.cfg.GreptimeWriteMode;
+import io.greptime.flink.query.GreptimeQueryConfig;
 import io.greptime.flink.sink.schema.GreptimeSchemaValidator;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -36,6 +38,20 @@ final class GreptimeConnectorOptions {
 
     static final ConfigOption<String> PASSWORD =
             ConfigOptions.key("password").stringType().noDefaultValue();
+
+    static final ConfigOption<String> QUERY_JDBC_URL =
+            ConfigOptions.key("query.jdbc-url").stringType().noDefaultValue();
+
+    static final ConfigOption<Integer> QUERY_CONNECT_TIMEOUT_MS = ConfigOptions.key("query.connect-timeout-ms")
+            .intType()
+            .defaultValue(GreptimeQueryConfig.DEFAULT_CONNECT_TIMEOUT_MS);
+
+    static final ConfigOption<Integer> QUERY_SOCKET_TIMEOUT_MS = ConfigOptions.key("query.socket-timeout-ms")
+            .intType()
+            .defaultValue(GreptimeQueryConfig.DEFAULT_SOCKET_TIMEOUT_MS);
+
+    static final ConfigOption<Integer> QUERY_FETCH_SIZE =
+            ConfigOptions.key("query.fetch-size").intType().defaultValue(GreptimeQueryConfig.DEFAULT_FETCH_SIZE);
 
     static final ConfigOption<String> TIME_INDEX =
             ConfigOptions.key("time-index").stringType().noDefaultValue();
@@ -152,7 +168,103 @@ final class GreptimeConnectorOptions {
 
     private GreptimeConnectorOptions() {}
 
+    static Set<ConfigOption<?>> allOptions() {
+        Set<ConfigOption<?>> options = sourceOptions();
+        options.addAll(sinkOptions());
+        return options;
+    }
+
+    static Set<ConfigOption<?>> sourceForwardOptions() {
+        Set<ConfigOption<?>> options = new HashSet<>();
+        options.add(USERNAME);
+        options.add(PASSWORD);
+        options.add(QUERY_JDBC_URL);
+        options.add(QUERY_CONNECT_TIMEOUT_MS);
+        options.add(QUERY_SOCKET_TIMEOUT_MS);
+        return options;
+    }
+
+    static Set<ConfigOption<?>> sinkForwardOptions() {
+        Set<ConfigOption<?>> options = new HashSet<>();
+        options.add(ENDPOINTS);
+        options.add(USERNAME);
+        options.add(PASSWORD);
+        return options;
+    }
+
+    static Set<ConfigOption<?>> sourceOptions() {
+        Set<ConfigOption<?>> options = sharedOptions();
+        options.add(QUERY_JDBC_URL);
+        options.add(QUERY_CONNECT_TIMEOUT_MS);
+        options.add(QUERY_SOCKET_TIMEOUT_MS);
+        options.add(QUERY_FETCH_SIZE);
+        return options;
+    }
+
+    static Set<ConfigOption<?>> sinkOptions() {
+        Set<ConfigOption<?>> options = sharedOptions();
+        options.add(ENDPOINTS);
+        options.add(TIME_INDEX);
+        options.add(TAGS);
+        options.add(AUTO_CREATE_TABLE);
+        options.add(APPEND_MODE);
+        options.add(MERGE_MODE);
+        options.add(TTL);
+        options.add(BATCH_MAX_ROWS);
+        options.add(FLUSH_INTERVAL_MS);
+        options.add(SINK_WRITE_MODE);
+        options.add(SINK_CHANGELOG_MODE);
+        options.add(SINK_PARALLELISM);
+        options.add(BULK_COLUMN_BUFFER_SIZE);
+        options.add(BULK_TIMEOUT_MS_PER_MESSAGE);
+        options.add(BULK_MAX_REQUESTS_IN_FLIGHT);
+        options.add(BULK_ALLOCATOR_INIT_RESERVATION_BYTES);
+        options.add(BULK_ALLOCATOR_MAX_ALLOCATION_BYTES);
+        options.add(WRITE_MAX_RETRIES);
+        options.add(WRITE_MAX_IN_FLIGHT_POINTS);
+        options.add(WRITE_LIMIT_POLICY);
+        options.add(WRITE_LIMIT_TIMEOUT_MS);
+        options.add(WRITE_COMPRESSION);
+        options.add(RPC_TIMEOUT_MS);
+        options.add(ROUTE_REFRESH_PERIOD_S);
+        options.add(ROUTE_HEALTH_TIMEOUT_MS);
+        return options;
+    }
+
+    private static Set<ConfigOption<?>> sharedOptions() {
+        Set<ConfigOption<?>> options = new HashSet<>();
+        options.add(DATABASE);
+        options.add(TABLE);
+        options.add(USERNAME);
+        options.add(PASSWORD);
+        return options;
+    }
+
     static void validate(ReadableConfig options, ResolvedSchema resolvedSchema) {
+        validateSinkOptions(options, resolvedSchema);
+    }
+
+    static void validateSinkFactoryOptions(ReadableConfig options, ResolvedSchema resolvedSchema) {
+        validateRequiredFactoryOption(options, ENDPOINTS, "sink");
+        validateRequiredFactoryOption(options, TIME_INDEX, "sink");
+        validateSinkOptions(options, resolvedSchema);
+    }
+
+    static GreptimeQueryConfig createQueryConfig(ReadableConfig options, String tableName) {
+        return GreptimeQueryConfig.builder()
+                .jdbcUrl(options.getOptional(QUERY_JDBC_URL).orElse(null))
+                .database(options.get(DATABASE))
+                .table(tableName)
+                .credentials(
+                        options.getOptional(USERNAME).orElse(null),
+                        options.getOptional(PASSWORD).orElse(null))
+                .connectTimeoutMs(options.get(QUERY_CONNECT_TIMEOUT_MS))
+                .socketTimeoutMs(options.get(QUERY_SOCKET_TIMEOUT_MS))
+                .fetchSize(options.get(QUERY_FETCH_SIZE))
+                .build();
+    }
+
+    private static void validateSinkOptions(ReadableConfig options, ResolvedSchema resolvedSchema) {
         GreptimeConfigValidator.validatePositive(formatOption(BATCH_MAX_ROWS), options.get(BATCH_MAX_ROWS));
         GreptimeConfigValidator.validateNonNegative(formatOption(FLUSH_INTERVAL_MS), options.get(FLUSH_INTERVAL_MS));
         GreptimeConfigValidator.validateSupportedValue(
@@ -181,6 +293,14 @@ final class GreptimeConnectorOptions {
                     .getPrimaryKey()
                     .map(UniqueConstraint::getColumns)
                     .ifPresent(validation::validatePrimaryKeyMatchesTags);
+        }
+    }
+
+    private static <T> void validateRequiredFactoryOption(
+            ReadableConfig options, ConfigOption<T> option, String owner) {
+        if (options.getOptional(option).isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Missing required GreptimeDB " + owner + " option: `" + option.key() + "`");
         }
     }
 
