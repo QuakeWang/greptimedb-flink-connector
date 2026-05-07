@@ -135,6 +135,19 @@ class GreptimeDynamicTableSourceFactoryTest {
     }
 
     @Test
+    void sourceRejectsPreflightOptionUntilSourcePreflightLands() {
+        Map<String, String> options = sourceOptions();
+        options.put(GreptimeConnectorOptions.PREFLIGHT_ENABLED.key(), "true");
+
+        IllegalArgumentException error =
+                assertThrows(IllegalArgumentException.class, () -> new GreptimeDynamicTableFactory()
+                        .createDynamicTableSource(
+                                new TestFactoryContext(options, resolvedSchema(), "identifier_metrics")));
+
+        assertEquals("`preflight.enabled` is not supported for GreptimeDB source yet", error.getMessage());
+    }
+
+    @Test
     void rejectsMissingAndUnsupportedSourceJdbcUrl() {
         IllegalArgumentException missing =
                 assertThrows(IllegalArgumentException.class, () -> new GreptimeDynamicTableFactory()

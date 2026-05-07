@@ -200,6 +200,31 @@ class GreptimeQueryConfigTest {
     }
 
     @Test
+    void supportsOwnerSpecificPreflightDiagnostics() {
+        assertEquals(
+                "`query.jdbc-url` is required when `preflight.enabled=true`",
+                assertThrows(IllegalArgumentException.class, () -> GreptimeQueryConfig.builder()
+                                .owner("GreptimeDB preflight")
+                                .requiredJdbcUrlMessage("`query.jdbc-url` is required when `preflight.enabled=true`")
+                                .database("public")
+                                .table("metrics")
+                                .build())
+                        .getMessage());
+
+        IllegalArgumentException unsupported =
+                assertThrows(IllegalArgumentException.class, () -> GreptimeQueryConfig.builder()
+                        .owner("GreptimeDB preflight")
+                        .jdbcUrl("jdbc:postgresql://alice:secret@127.0.0.1:4003/public")
+                        .database("public")
+                        .table("metrics")
+                        .build());
+
+        assertTrue(unsupported.getMessage().contains("GreptimeDB preflight currently supports only MySQL JDBC"));
+        assertFalse(unsupported.getMessage().contains("alice"));
+        assertFalse(unsupported.getMessage().contains("secret"));
+    }
+
+    @Test
     void missingDriverDiagnosticIncludesRedactedQueryContext() {
         GreptimeQueryConfig config = GreptimeQueryConfig.builder()
                 .jdbcUrl("jdbc:mysql://127.0.0.1:4002/public?useSSL=false")

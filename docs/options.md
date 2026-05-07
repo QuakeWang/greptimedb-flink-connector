@@ -21,7 +21,7 @@ CREATE TABLE metrics_sink (
 );
 ```
 
-For sinks, `connector`, `endpoints`, and `time-index` are required. For bounded sources, `connector` and `query.jdbc-url` are required. If `table` is not set, the connector uses the Flink catalog table name.
+For sinks, `connector`, `endpoints`, and `time-index` are required. For bounded sources, `connector` and `query.jdbc-url` are required. The same JDBC URL is also used by sink preflight metadata validation when enabled. If `table` is not set, the connector uses the Flink catalog table name.
 
 ```sql
 CREATE TABLE metrics_src (
@@ -50,15 +50,21 @@ CREATE TABLE metrics_src (
 | `route.refresh-period-s` | No | `600` | sink | SDK route table background refresh period in seconds. Must be greater than or equal to `0`; `0` disables background refresh. |
 | `route.health-timeout-ms` | No | `1000` | sink | SDK route health check timeout. Must be greater than `0`. |
 
+## Preflight Options
+
+| Option | Required | Default | Scope | Description |
+| --- | --- | --- | --- | --- |
+| `preflight.enabled` | No | `false` | sink | Enables read-only metadata preflight for bulk insert-only sinks. The connector validates the target table through `query.jdbc-url` before creating the gRPC write client. Source DDL rejects this option until source preflight lands. |
+
 ## Query Source Options
 
 The connector implements a bounded batch source backed by MySQL-compatible JDBC. The source is single-split and does not provide streaming, CDC, lookup, filter pushdown, PostgreSQL JDBC, or Arrow Flight/gRPC read support.
 
 | Option | Required | Default | Scope | Description |
 | --- | --- | --- | --- | --- |
-| `query.jdbc-url` | source | none | source | GreptimeDB MySQL JDBC URL. Only URLs starting with `jdbc:mysql:` are accepted. Do not put credentials or authentication tokens in this URL. The MySQL-compatible JDBC driver must be available on the Flink classpath. |
-| `query.connect-timeout-ms` | No | `10000` | source | MySQL Connector/J `connectTimeout` property in milliseconds. Must be greater than `0`; do not duplicate it in `query.jdbc-url`. |
-| `query.socket-timeout-ms` | No | `300000` | source | MySQL Connector/J `socketTimeout` property in milliseconds. Must be greater than `0`; do not duplicate it in `query.jdbc-url`. |
+| `query.jdbc-url` | source/preflight | none | source/preflight | GreptimeDB MySQL JDBC URL. Only URLs starting with `jdbc:mysql:` are accepted. Do not put credentials or authentication tokens in this URL. The MySQL-compatible JDBC driver must be available on the Flink classpath. |
+| `query.connect-timeout-ms` | No | `10000` | source/preflight | MySQL Connector/J `connectTimeout` property in milliseconds. Must be greater than `0`; do not duplicate it in `query.jdbc-url`. |
+| `query.socket-timeout-ms` | No | `300000` | source/preflight | MySQL Connector/J `socketTimeout` property in milliseconds. Must be greater than `0`; do not duplicate it in `query.jdbc-url`. |
 | `query.fetch-size` | No | `0` | source | JDBC fetch size hint. `0` leaves the driver default; positive values are passed to `Statement.setFetchSize`. |
 
 Source scans support top-level projection pushdown, projection reorder, empty projection for row-count preserving scans, and best-effort limit pushdown. Filters remain in Flink and are not accepted by the connector.
@@ -132,11 +138,11 @@ Bulk write does not use Regular Write hints or compression. The following Regula
 
 ## Type Support
 
-Sink writes and table auto-creation support the Flink-to-GreptimeDB type mapping below.
+Sink writes and table auto-creation support the Flink-to-GreptimeDB type mapping below. The GreptimeDB type names match `information_schema.columns.greptime_data_type`, which is also used by sink preflight checks.
 
-| Flink logical type | GreptimeDB type |
+| Flink logical type | GreptimeDB metadata type |
 | --- | --- |
-| `BOOLEAN` | `Bool` |
+| `BOOLEAN` | `Boolean` |
 | `TINYINT` | `Int8` |
 | `SMALLINT` | `Int16` |
 | `INTEGER` | `Int32` |
@@ -146,9 +152,15 @@ Sink writes and table auto-creation support the Flink-to-GreptimeDB type mapping
 | `CHAR`, `VARCHAR` | `String` |
 | `BINARY`, `VARBINARY` | `Binary` |
 | `DATE` | `Date` |
-| `DECIMAL(p, s)` | `Decimal128`, `p <= 38` |
-| `TIMESTAMP(0/3/6/9)` | second/millisecond/microsecond/nanosecond timestamp |
-| `TIMESTAMP_LTZ(0/3/6/9)` | second/millisecond/microsecond/nanosecond timestamp |
+| `DECIMAL(p, s)` | `Decimal(p, s)`, `p <= 38` |
+| `TIMESTAMP(0)` | `TimestampSecond` |
+| `TIMESTAMP(3)` | `TimestampMillisecond` |
+| `TIMESTAMP(6)` | `TimestampMicrosecond` |
+| `TIMESTAMP(9)` | `TimestampNanosecond` |
+| `TIMESTAMP_LTZ(0)` | `TimestampSecond` |
+| `TIMESTAMP_LTZ(3)` | `TimestampMillisecond` |
+| `TIMESTAMP_LTZ(6)` | `TimestampMicrosecond` |
+| `TIMESTAMP_LTZ(9)` | `TimestampNanosecond` |
 
 Flink logical types not listed above are rejected for sink schemas. Source scans support the same scalar logical types except `TIMESTAMP_LTZ`, which is intentionally rejected until the GreptimeDB MySQL timestamp/session timezone semantics are covered by real integration tests.
 

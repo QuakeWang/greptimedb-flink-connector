@@ -38,14 +38,18 @@ public enum GreptimeQueryDialect {
     }
 
     public static GreptimeQueryDialect fromJdbcUrl(String jdbcUrl) {
+        return fromJdbcUrl(jdbcUrl, "GreptimeDB query source");
+    }
+
+    public static GreptimeQueryDialect fromJdbcUrl(String jdbcUrl, String owner) {
         Objects.requireNonNull(jdbcUrl, "jdbcUrl");
         String normalizedUrl = jdbcUrl.toLowerCase(Locale.ROOT);
         if (normalizedUrl.startsWith(MYSQL.jdbcUrlPrefix)) {
             return MYSQL;
         }
-        throw new IllegalArgumentException(
-                "GreptimeDB query source currently supports only MySQL JDBC (`jdbc:mysql:`), but `query.jdbc-url` was: "
-                        + MYSQL.redactJdbcUrl(jdbcUrl));
+        throw new IllegalArgumentException(Objects.requireNonNull(owner, "owner")
+                + " currently supports only MySQL JDBC (`jdbc:mysql:`), but `query.jdbc-url` was: "
+                + MYSQL.redactJdbcUrl(jdbcUrl));
     }
 
     public String protocolName() {

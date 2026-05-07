@@ -4,6 +4,7 @@ import io.greptime.flink.cfg.GreptimeBulkWriteConfig;
 import io.greptime.flink.cfg.GreptimeChangelogMode;
 import io.greptime.flink.cfg.GreptimeSinkConfig;
 import io.greptime.flink.cfg.GreptimeWriteMode;
+import io.greptime.flink.preflight.GreptimePreflightConfig;
 import io.greptime.flink.query.GreptimeQueryConfig;
 import io.greptime.flink.query.GreptimeQueryDialect;
 import io.greptime.flink.sink.schema.GreptimeTableSchema;
@@ -48,6 +49,7 @@ public final class GreptimeDynamicTableFactory implements DynamicTableSinkFactor
 
     @Override
     public DynamicTableSource createDynamicTableSource(Context context) {
+        rejectSourcePreflightOption(context);
         ReadableConfig options = validateFactoryOptions(
                 context, GreptimeConnectorOptions.sourceOptions(), GreptimeConnectorOptions.sourceForwardOptions());
         ResolvedSchema resolvedSchema = context.getCatalogTable().getResolvedSchema();
@@ -130,8 +132,18 @@ public final class GreptimeDynamicTableFactory implements DynamicTableSinkFactor
         GreptimeTableSchema tableSchema = GreptimeTableSchema.from(
                 tableName, physicalRowDataType, options.get(GreptimeConnectorOptions.TIME_INDEX), tags);
         Integer sinkParallelism = effectiveSinkParallelism(options, sinkConfig.getChangelogMode());
+        GreptimePreflightConfig preflightConfig = GreptimeConnectorOptions.createSinkPreflightConfig(
+                options, context.getCatalogTable().getOptions(), context.getEnrichmentOptions(), tableName);
 
-        return new GreptimeDynamicTableSink(sinkConfig, tableSchema, sinkParallelism);
+        return new GreptimeDynamicTableSink(sinkConfig, tableSchema, sinkParallelism, preflightConfig);
+    }
+
+    private static void rejectSourcePreflightOption(Context context) {
+        String key = GreptimeConnectorOptions.PREFLIGHT_ENABLED.key();
+        if (context.getCatalogTable().getOptions().containsKey(key)
+                || context.getEnrichmentOptions().containsKey(key)) {
+            throw new IllegalArgumentException("`preflight.enabled` is not supported for GreptimeDB source yet");
+        }
     }
 
     private static Integer effectiveSinkParallelism(ReadableConfig options, GreptimeChangelogMode changelogMode) {
