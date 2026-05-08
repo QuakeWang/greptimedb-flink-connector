@@ -178,11 +178,7 @@ public final class GreptimeTableInspector {
                     "row-key-set-mismatch",
                     "tags",
                     localSchema.getTagColumns().toString(),
-                    remote.getColumns().stream()
-                            .filter(GreptimeColumnMetadata::isPrimaryKeyColumn)
-                            .map(GreptimeColumnMetadata::getName)
-                            .collect(Collectors.toList())
-                            .toString(),
+                    remote.getPrimaryKeyColumnSet().toString(),
                     "bulk write requires local tags to match remote primary key column set"));
         }
     }
