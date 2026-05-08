@@ -110,6 +110,105 @@ class GreptimeDynamicTableSinkIT {
     }
 
     @Test
+    void bulkPreflightWritesRowsIntoPrecreatedTable() throws Exception {
+        TableEnvironment tableEnv = newBatchTableEnvironment();
+        String tableName = "metrics_bulk_preflight_sink";
+
+        dropTableIfExists(tableName);
+        createMetricsTable(tableName);
+        tableEnv.executeSql(createSinkTableSql(
+                        "metrics_bulk_preflight_sink",
+                        tableName,
+                        METRICS_COLUMNS,
+                        "host;region",
+                        bulkOptions() + preflightOptions()))
+                .await();
+
+        tableEnv.executeSql(insertRowsSql("metrics_bulk_preflight_sink")).await();
+
+        assertEquals(
+                List.of(
+                        "host-1|eu-west|0.25|2026-04-28T15:00",
+                        "host-2|ap-south|0.5|2026-04-28T15:01",
+                        "host-3|us-east|0.75|2026-04-28T15:02"),
+                queryRows(tableName));
+    }
+
+    @Test
+    void bulkPreflightFailsBeforeGrpcClientWhenTableIsMissing() throws Exception {
+        TableEnvironment tableEnv = newBatchTableEnvironment();
+
+        tableEnv.executeSql(createSinkTableSql(
+                        "metrics_bulk_preflight_missing",
+                        "missing_metrics_bulk_preflight",
+                        METRICS_COLUMNS,
+                        "host;region",
+                        bulkOptions() + preflightOptions()))
+                .await();
+
+        Exception error =
+                assertThrows(Exception.class, () -> tableEnv.executeSql(insertRowsSql("metrics_bulk_preflight_missing"))
+                        .await());
+
+        String messages = collectMessages(error).toLowerCase();
+        assertTrue(messages.contains("greptimedb preflight failed"), messages);
+        assertTrue(messages.contains("reason=missing-table"), messages);
+        assertFalse(messages.contains("failed to bulk write rows to greptimedb"), messages);
+        assertFalse(tableExists("missing_metrics_bulk_preflight"));
+    }
+
+    @Test
+    void bulkPreflightFailsBeforeGrpcClientWhenColumnTypeMismatches() throws Exception {
+        TableEnvironment tableEnv = newBatchTableEnvironment();
+        String tableName = "metrics_bulk_preflight_type_mismatch";
+        dropTableIfExists(tableName);
+        createMetricsTableWithStringCpu(tableName);
+
+        tableEnv.executeSql(createSinkTableSql(
+                        "metrics_bulk_preflight_type_mismatch",
+                        tableName,
+                        METRICS_COLUMNS,
+                        "host;region",
+                        bulkOptions() + preflightOptions()))
+                .await();
+
+        Exception error = assertThrows(
+                Exception.class, () -> tableEnv.executeSql(insertRowsSql("metrics_bulk_preflight_type_mismatch"))
+                        .await());
+
+        String messages = collectMessages(error).toLowerCase();
+        assertTrue(messages.contains("greptimedb preflight failed"), messages);
+        assertTrue(messages.contains("reason=type-mismatch"), messages);
+        assertTrue(messages.contains("column cpu"), messages);
+        assertFalse(messages.contains("failed to bulk write rows to greptimedb"), messages);
+    }
+
+    @Test
+    void bulkPreflightFailsBeforeGrpcClientWhenPrimaryKeySetMismatches() throws Exception {
+        TableEnvironment tableEnv = newBatchTableEnvironment();
+        String tableName = "metrics_bulk_preflight_key_mismatch";
+        dropTableIfExists(tableName);
+        createMetricsTableWithHostPrimaryKey(tableName);
+
+        tableEnv.executeSql(createSinkTableSql(
+                        "metrics_bulk_preflight_key_mismatch",
+                        tableName,
+                        METRICS_COLUMNS,
+                        "host;region",
+                        bulkOptions() + preflightOptions()))
+                .await();
+
+        Exception error = assertThrows(
+                Exception.class, () -> tableEnv.executeSql(insertRowsSql("metrics_bulk_preflight_key_mismatch"))
+                        .await());
+
+        String messages = collectMessages(error).toLowerCase();
+        assertTrue(messages.contains("greptimedb preflight failed"), messages);
+        assertTrue(messages.contains("reason=row-key-set-mismatch"), messages);
+        assertFalse(messages.contains("failed to bulk write rows to greptimedb"), messages);
+    }
+
+    @Test
     void bulkModeSurfacesMissingTableDiagnostic() throws Exception {
         TableEnvironment tableEnv = newBatchTableEnvironment();
 
@@ -418,6 +517,18 @@ class GreptimeDynamicTableSinkIT {
                 extraOptions);
     }
 
+    private String bulkOptions() {
+        return ", 'sink.write-mode' = 'bulk'"
+                + ", 'auto-create-table' = 'false'"
+                + ", 'bulk.column-buffer-size' = '1024'"
+                + ", 'bulk.timeout-ms-per-message' = '60000'"
+                + ", 'bulk.max-requests-in-flight' = '8'";
+    }
+
+    private String preflightOptions() {
+        return ", 'preflight.enabled' = 'true'" + ", 'query.jdbc-url' = '" + jdbcUrl() + "'";
+    }
+
     private String insertRowsSql(String flinkTableName) {
         return insertValuesSql(
                 flinkTableName,
@@ -522,6 +633,39 @@ class GreptimeDynamicTableSinkIT {
         }
     }
 
+    private void createMetricsTableWithStringCpu(String tableName) throws SQLException {
+        try (Connection connection = openConnection();
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE " + tableName + " ("
+                    + "host STRING,"
+                    + "`region` STRING,"
+                    + "cpu STRING,"
+                    + "ts TIMESTAMP(3) TIME INDEX,"
+                    + "PRIMARY KEY(host, `region`)"
+                    + ")");
+        }
+    }
+
+    private void createMetricsTableWithHostPrimaryKey(String tableName) throws SQLException {
+        try (Connection connection = openConnection();
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE " + tableName + " ("
+                    + "host STRING,"
+                    + "`region` STRING,"
+                    + "cpu DOUBLE,"
+                    + "ts TIMESTAMP(3) TIME INDEX,"
+                    + "PRIMARY KEY(host)"
+                    + ")");
+        }
+    }
+
+    private void dropTableIfExists(String tableName) throws SQLException {
+        try (Connection connection = openConnection();
+                Statement statement = connection.createStatement()) {
+            statement.executeUpdate("DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
     private String nullableValue(ResultSet resultSet, String columnName) throws SQLException {
         Object value = resultSet.getObject(columnName);
         return value == null ? "null" : value.toString();
@@ -543,10 +687,13 @@ class GreptimeDynamicTableSinkIT {
     }
 
     private Connection openConnection() throws SQLException {
-        String jdbcUrl = String.format(
+        return DriverManager.getConnection(jdbcUrl());
+    }
+
+    private String jdbcUrl() {
+        return String.format(
                 "jdbc:mysql://%s:%d/public?useSSL=false&allowPublicKeyRetrieval=true",
                 GREPTIMEDB.getHost(), GREPTIMEDB.getMappedPort(4002));
-        return DriverManager.getConnection(jdbcUrl);
     }
 
     private ProcessResult runShadedJarProbe(String tableName) throws Exception {

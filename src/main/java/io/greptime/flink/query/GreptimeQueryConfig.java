@@ -25,8 +25,8 @@ public final class GreptimeQueryConfig implements Serializable {
     private final int fetchSize;
 
     private GreptimeQueryConfig(Builder builder) {
-        String validatedJdbcUrl = validateRequiredOption("`query.jdbc-url`", builder.jdbcUrl);
-        GreptimeQueryDialect resolvedDialect = GreptimeQueryDialect.fromJdbcUrl(validatedJdbcUrl);
+        String validatedJdbcUrl = validateRequiredJdbcUrl(builder.jdbcUrl, builder.requiredJdbcUrlMessage);
+        GreptimeQueryDialect resolvedDialect = GreptimeQueryDialect.fromJdbcUrl(validatedJdbcUrl, builder.owner);
         String validatedDatabase = validateRequiredOption("`database`", builder.database);
         String validatedTable = validateRequiredOption("`table`", builder.table);
         String normalizedUsername = GreptimeConfigValidator.normalizeBlank(builder.username);
@@ -118,6 +118,21 @@ public final class GreptimeQueryConfig implements Serializable {
                 + fetchSize;
     }
 
+    public String describeMetadataConnectionContext() {
+        return "protocol="
+                + dialect.protocolName()
+                + ", table="
+                + database
+                + "."
+                + table
+                + ", jdbcUrl="
+                + dialect.redactJdbcUrl(jdbcUrl)
+                + ", connectTimeoutMs="
+                + connectTimeoutMs
+                + ", socketTimeoutMs="
+                + socketTimeoutMs;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) {
@@ -164,14 +179,20 @@ public final class GreptimeQueryConfig implements Serializable {
         }
     }
 
-    private static String validateRequiredOption(String name, String value) {
+    private static String validateRequiredJdbcUrl(String value, String missingMessage) {
         if (value == null) {
-            throw new IllegalArgumentException(name + " is required for GreptimeDB source");
+            throw new IllegalArgumentException(missingMessage);
         }
+        return GreptimeConfigValidator.validateRequiredText("`query.jdbc-url`", value);
+    }
+
+    private static String validateRequiredOption(String name, String value) {
         return GreptimeConfigValidator.validateRequiredText(name, value);
     }
 
     public static final class Builder {
+        private String owner = "GreptimeDB query source";
+        private String requiredJdbcUrlMessage = "`query.jdbc-url` is required for GreptimeDB source";
         private String jdbcUrl;
         private String database;
         private String table;
@@ -182,6 +203,16 @@ public final class GreptimeQueryConfig implements Serializable {
         private int fetchSize = DEFAULT_FETCH_SIZE;
 
         private Builder() {}
+
+        public Builder owner(String owner) {
+            this.owner = Objects.requireNonNull(owner, "owner");
+            return this;
+        }
+
+        public Builder requiredJdbcUrlMessage(String requiredJdbcUrlMessage) {
+            this.requiredJdbcUrlMessage = Objects.requireNonNull(requiredJdbcUrlMessage, "requiredJdbcUrlMessage");
+            return this;
+        }
 
         public Builder jdbcUrl(String jdbcUrl) {
             this.jdbcUrl = jdbcUrl;

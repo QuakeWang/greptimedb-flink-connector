@@ -9,6 +9,7 @@ import io.greptime.flink.cfg.GreptimeBulkWriteConfig;
 import io.greptime.flink.cfg.GreptimeChangelogMode;
 import io.greptime.flink.cfg.GreptimeSinkConfig;
 import io.greptime.flink.cfg.GreptimeWriteMode;
+import io.greptime.flink.query.GreptimeQueryConfig;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -92,6 +93,113 @@ class GreptimeConnectorOptionsTest {
         assertEquals(4, bulkWriteConfig.getMaxRequestsInFlight());
         assertEquals(1024L, bulkWriteConfig.getAllocatorInitReservationBytes());
         assertEquals(65536L, bulkWriteConfig.getAllocatorMaxAllocationBytes());
+    }
+
+    @Test
+    void createsBulkPreflightConfigFromFactoryOptions() {
+        Map<String, String> options = bulkPreflightOptionMap();
+        options.put(GreptimeConnectorOptions.QUERY_JDBC_URL.key(), "jdbc:mysql://127.0.0.1:4002/public?useSSL=false");
+        options.put(GreptimeConnectorOptions.QUERY_CONNECT_TIMEOUT_MS.key(), "123");
+        options.put(GreptimeConnectorOptions.QUERY_SOCKET_TIMEOUT_MS.key(), "456");
+        options.put(GreptimeConnectorOptions.QUERY_FETCH_SIZE.key(), "abc");
+
+        GreptimeDynamicTableSink sink =
+                createSink(options, resolvedSchemaWithPrimaryKey(List.of("host")), "bulk_metrics");
+
+        assertTrue(sink.getPreflightConfig().isEnabled());
+        assertEquals(
+                "jdbc:mysql://127.0.0.1:4002/public?useSSL=false",
+                sink.getPreflightConfig().getQueryConfig().orElseThrow().getJdbcUrl());
+        assertEquals(
+                123, sink.getPreflightConfig().getQueryConfig().orElseThrow().getConnectTimeoutMs());
+        assertEquals(
+                456, sink.getPreflightConfig().getQueryConfig().orElseThrow().getSocketTimeoutMs());
+        assertEquals(
+                GreptimeQueryConfig.DEFAULT_FETCH_SIZE,
+                sink.getPreflightConfig().getQueryConfig().orElseThrow().getFetchSize());
+        assertEquals(sink, sink.copy());
+    }
+
+    @Test
+    void createsBulkPreflightConfigFromEnrichmentQueryOptions() {
+        Map<String, String> options = bulkPreflightOptionMap();
+        Map<String, String> enrichmentOptions = Map.of(
+                GreptimeConnectorOptions.QUERY_JDBC_URL.key(),
+                "jdbc:mysql://10.0.0.1:4002/public?useSSL=false",
+                GreptimeConnectorOptions.QUERY_CONNECT_TIMEOUT_MS.key(),
+                "111",
+                GreptimeConnectorOptions.QUERY_SOCKET_TIMEOUT_MS.key(),
+                "222");
+
+        GreptimeDynamicTableSink sink =
+                createSink(options, enrichmentOptions, resolvedSchemaWithPrimaryKey(List.of("host")), "bulk_metrics");
+
+        assertTrue(sink.getPreflightConfig().isEnabled());
+        assertEquals(
+                "jdbc:mysql://10.0.0.1:4002/public?useSSL=false",
+                sink.getPreflightConfig().getQueryConfig().orElseThrow().getJdbcUrl());
+        assertEquals(
+                111, sink.getPreflightConfig().getQueryConfig().orElseThrow().getConnectTimeoutMs());
+        assertEquals(
+                222, sink.getPreflightConfig().getQueryConfig().orElseThrow().getSocketTimeoutMs());
+    }
+
+    @Test
+    void preflightEnabledBulkSinkRequiresJdbcUrl() {
+        Map<String, String> options = bulkPreflightOptionMap();
+
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> createSink(options, resolvedSchemaWithPrimaryKey(List.of("host")), "bulk_metrics"));
+
+        assertEquals("`query.jdbc-url` is required when `preflight.enabled=true`", error.getMessage());
+    }
+
+    @Test
+    void preflightEnabledBulkSinkValidatesQueryTimeouts() {
+        Map<String, String> options = bulkPreflightOptionMap();
+        options.put(GreptimeConnectorOptions.QUERY_JDBC_URL.key(), "jdbc:mysql://127.0.0.1:4002/public?useSSL=false");
+        options.put(GreptimeConnectorOptions.QUERY_CONNECT_TIMEOUT_MS.key(), "-1");
+
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> createSink(options, resolvedSchemaWithPrimaryKey(List.of("host")), "bulk_metrics"));
+
+        assertEquals("`query.connect-timeout-ms` must be greater than 0", error.getMessage());
+    }
+
+    @Test
+    void preflightDisabledSinkIgnoresInvalidQueryOptions() {
+        Map<String, String> options = baseOptionMap();
+        options.put(GreptimeConnectorOptions.QUERY_JDBC_URL.key(), "jdbc:postgresql://127.0.0.1:4003/public");
+        options.put(GreptimeConnectorOptions.QUERY_CONNECT_TIMEOUT_MS.key(), "abc");
+        options.put(GreptimeConnectorOptions.QUERY_FETCH_SIZE.key(), "abc");
+
+        GreptimeDynamicTableSink sink = createSink(options, resolvedSchemaWithoutPrimaryKey(), "metrics");
+
+        assertFalse(sink.getPreflightConfig().isEnabled());
+    }
+
+    @Test
+    void preflightEnabledRegularAndRetractSinksFailUnsupportedMode() {
+        Map<String, String> regularOptions = baseOptionMap();
+        regularOptions.put(GreptimeConnectorOptions.PREFLIGHT_ENABLED.key(), "true");
+        IllegalArgumentException regularError = assertThrows(
+                IllegalArgumentException.class,
+                () -> createSink(regularOptions, resolvedSchemaWithPrimaryKey(List.of("host")), "regular_metrics"));
+
+        assertTrue(regularError.getMessage().contains("unsupported-mode"));
+        assertTrue(regularError.getMessage().contains("mode=regular"));
+
+        Map<String, String> retractOptions = baseOptionMap();
+        retractOptions.put(GreptimeConnectorOptions.PREFLIGHT_ENABLED.key(), "true");
+        retractOptions.put(GreptimeConnectorOptions.SINK_CHANGELOG_MODE.key(), "retract");
+        IllegalArgumentException retractError = assertThrows(
+                IllegalArgumentException.class,
+                () -> createSink(retractOptions, resolvedSchemaWithPrimaryKey(List.of("host")), "retract_metrics"));
+
+        assertTrue(retractError.getMessage().contains("unsupported-mode"));
+        assertTrue(retractError.getMessage().contains("mode=retract"));
     }
 
     @Test
@@ -549,6 +657,14 @@ class GreptimeConnectorOptionsTest {
         return options;
     }
 
+    private static Map<String, String> bulkPreflightOptionMap() {
+        Map<String, String> options = baseOptionMap();
+        options.put(GreptimeConnectorOptions.SINK_WRITE_MODE.key(), "bulk");
+        options.put(GreptimeConnectorOptions.AUTO_CREATE_TABLE.key(), "false");
+        options.put(GreptimeConnectorOptions.PREFLIGHT_ENABLED.key(), "true");
+        return options;
+    }
+
     private static Configuration bulkOptions() {
         Configuration options = baseOptions(List.of("host"));
         options.set(GreptimeConnectorOptions.SINK_WRITE_MODE, "bulk");
@@ -560,8 +676,16 @@ class GreptimeConnectorOptionsTest {
 
     private static GreptimeDynamicTableSink createSink(
             Map<String, String> options, ResolvedSchema resolvedSchema, String objectName) {
+        return createSink(options, Map.of(), resolvedSchema, objectName);
+    }
+
+    private static GreptimeDynamicTableSink createSink(
+            Map<String, String> options,
+            Map<String, String> enrichmentOptions,
+            ResolvedSchema resolvedSchema,
+            String objectName) {
         DynamicTableSink sink = new GreptimeDynamicTableFactory()
-                .createDynamicTableSink(new TestFactoryContext(options, resolvedSchema, objectName));
+                .createDynamicTableSink(new TestFactoryContext(options, enrichmentOptions, resolvedSchema, objectName));
         assertTrue(sink instanceof GreptimeDynamicTableSink);
         return (GreptimeDynamicTableSink) sink;
     }
@@ -585,9 +709,18 @@ class GreptimeConnectorOptionsTest {
     private static final class TestFactoryContext implements DynamicTableFactory.Context {
         private final ObjectIdentifier objectIdentifier;
         private final ResolvedCatalogTable catalogTable;
+        private final Map<String, String> enrichmentOptions;
         private final Configuration configuration = new Configuration();
 
         private TestFactoryContext(Map<String, String> options, ResolvedSchema resolvedSchema, String objectName) {
+            this(options, Map.of(), resolvedSchema, objectName);
+        }
+
+        private TestFactoryContext(
+                Map<String, String> options,
+                Map<String, String> enrichmentOptions,
+                ResolvedSchema resolvedSchema,
+                String objectName) {
             CatalogTable table = CatalogTable.newBuilder()
                     .schema(Schema.newBuilder()
                             .fromResolvedSchema(resolvedSchema)
@@ -596,6 +729,7 @@ class GreptimeConnectorOptionsTest {
                     .build();
             this.objectIdentifier = ObjectIdentifier.of("default_catalog", "default_database", objectName);
             this.catalogTable = new ResolvedCatalogTable(table, resolvedSchema);
+            this.enrichmentOptions = Map.copyOf(enrichmentOptions);
         }
 
         @Override
@@ -610,7 +744,7 @@ class GreptimeConnectorOptionsTest {
 
         @Override
         public Map<String, String> getEnrichmentOptions() {
-            return Map.of();
+            return enrichmentOptions;
         }
 
         @Override

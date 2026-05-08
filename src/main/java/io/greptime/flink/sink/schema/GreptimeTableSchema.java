@@ -57,6 +57,10 @@ public final class GreptimeTableSchema implements Serializable {
         return timeIndex;
     }
 
+    public List<String> getTagColumns() {
+        return tagColumns;
+    }
+
     public TableSchema toGreptimeTableSchema() {
         RowType rowType = (RowType) physicalRowDataType.getLogicalType();
         List<Integer> columnPositions = new ArrayList<>(rowType.getFieldCount());

@@ -6,15 +6,19 @@ import io.greptime.flink.cfg.GreptimeConfigValidator;
 import io.greptime.flink.cfg.GreptimeHintOptions;
 import io.greptime.flink.cfg.GreptimeSinkConfig;
 import io.greptime.flink.cfg.GreptimeWriteMode;
+import io.greptime.flink.preflight.GreptimePreflightConfig;
 import io.greptime.flink.query.GreptimeQueryConfig;
 import io.greptime.flink.sink.schema.GreptimeSchemaValidator;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.catalog.UniqueConstraint;
@@ -52,6 +56,9 @@ final class GreptimeConnectorOptions {
 
     static final ConfigOption<Integer> QUERY_FETCH_SIZE =
             ConfigOptions.key("query.fetch-size").intType().defaultValue(GreptimeQueryConfig.DEFAULT_FETCH_SIZE);
+
+    static final ConfigOption<Boolean> PREFLIGHT_ENABLED =
+            ConfigOptions.key("preflight.enabled").booleanType().defaultValue(false);
 
     static final ConfigOption<String> TIME_INDEX =
             ConfigOptions.key("time-index").stringType().noDefaultValue();
@@ -220,6 +227,7 @@ final class GreptimeConnectorOptions {
         options.add(BULK_MAX_REQUESTS_IN_FLIGHT);
         options.add(BULK_ALLOCATOR_INIT_RESERVATION_BYTES);
         options.add(BULK_ALLOCATOR_MAX_ALLOCATION_BYTES);
+        options.add(PREFLIGHT_ENABLED);
         options.add(WRITE_MAX_RETRIES);
         options.add(WRITE_MAX_IN_FLIGHT_POINTS);
         options.add(WRITE_LIMIT_POLICY);
@@ -262,6 +270,68 @@ final class GreptimeConnectorOptions {
                 .socketTimeoutMs(options.get(QUERY_SOCKET_TIMEOUT_MS))
                 .fetchSize(options.get(QUERY_FETCH_SIZE))
                 .build();
+    }
+
+    static GreptimePreflightConfig createSinkPreflightConfig(
+            ReadableConfig options,
+            Map<String, String> catalogOptions,
+            Map<String, String> enrichmentOptions,
+            String tableName) {
+        if (!options.get(PREFLIGHT_ENABLED)) {
+            return GreptimePreflightConfig.disabled();
+        }
+
+        GreptimeWriteMode writeMode = GreptimeWriteMode.fromOptionValue(options.get(SINK_WRITE_MODE));
+        GreptimeChangelogMode changelogMode = GreptimeChangelogMode.fromOptionValue(options.get(SINK_CHANGELOG_MODE));
+        if (writeMode != GreptimeWriteMode.BULK || changelogMode != GreptimeChangelogMode.INSERT_ONLY) {
+            throw new IllegalArgumentException("GreptimeDB preflight unsupported-mode: mode="
+                    + preflightMode(writeMode, changelogMode)
+                    + ", table="
+                    + options.get(DATABASE)
+                    + "."
+                    + tableName
+                    + ", `preflight.enabled=true` is currently supported only when `sink.write-mode=bulk`");
+        }
+
+        Configuration queryOptions = resolvePreflightQueryOptions(catalogOptions, enrichmentOptions);
+        GreptimeQueryConfig queryConfig = GreptimeQueryConfig.builder()
+                .owner("GreptimeDB preflight")
+                .requiredJdbcUrlMessage("`query.jdbc-url` is required when `preflight.enabled=true`")
+                .jdbcUrl(queryOptions.getOptional(QUERY_JDBC_URL).orElse(null))
+                .database(options.get(DATABASE))
+                .table(tableName)
+                .credentials(
+                        options.getOptional(USERNAME).orElse(null),
+                        options.getOptional(PASSWORD).orElse(null))
+                .connectTimeoutMs(queryOptions.get(QUERY_CONNECT_TIMEOUT_MS))
+                .socketTimeoutMs(queryOptions.get(QUERY_SOCKET_TIMEOUT_MS))
+                .build();
+        return GreptimePreflightConfig.enabled(queryConfig);
+    }
+
+    private static Configuration resolvePreflightQueryOptions(
+            Map<String, String> catalogOptions, Map<String, String> enrichmentOptions) {
+        Map<String, String> rawOptions = new HashMap<>();
+        mergeRawOption(rawOptions, catalogOptions, QUERY_JDBC_URL);
+        mergeRawOption(rawOptions, catalogOptions, QUERY_CONNECT_TIMEOUT_MS);
+        mergeRawOption(rawOptions, catalogOptions, QUERY_SOCKET_TIMEOUT_MS);
+        mergeRawOption(rawOptions, enrichmentOptions, QUERY_JDBC_URL);
+        mergeRawOption(rawOptions, enrichmentOptions, QUERY_CONNECT_TIMEOUT_MS);
+        mergeRawOption(rawOptions, enrichmentOptions, QUERY_SOCKET_TIMEOUT_MS);
+        return Configuration.fromMap(rawOptions);
+    }
+
+    private static void mergeRawOption(Map<String, String> target, Map<String, String> source, ConfigOption<?> option) {
+        if (source.containsKey(option.key())) {
+            target.put(option.key(), source.get(option.key()));
+        }
+    }
+
+    private static String preflightMode(GreptimeWriteMode writeMode, GreptimeChangelogMode changelogMode) {
+        if (changelogMode == GreptimeChangelogMode.RETRACT) {
+            return "retract";
+        }
+        return writeMode.optionValue();
     }
 
     private static void validateSinkOptions(ReadableConfig options, ResolvedSchema resolvedSchema) {
